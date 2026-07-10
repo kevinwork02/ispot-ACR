@@ -599,6 +599,69 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                             dc2.metric("OTT Impressions", format_number(clicked_imp))
                             dc3.metric("OTT Viewers", format_number(d.get("ott_viewers", 0)))
                             dc4.metric("Incremental Viewers", format_number(d.get("incremental_viewers", 0)))
+
+                            # Trend over time for clicked DMA
+                            st.markdown("##### Trend Over Time")
+                            try:
+                                dma_esc = clicked_dma.replace("'", "''")
+                                trend_where = f"LOWER(brand) = LOWER('{brand_escaped}') AND LOWER(dma) = LOWER('{dma_esc}')"
+                                if selected_campaign_id is not None:
+                                    trend_where += f" AND campaign_id = {selected_campaign_id}"
+                                trend_df = run_query(f"""
+                                    SELECT report_date,
+                                        SUM(ott_total_impressions) AS ott_impressions,
+                                        SUM(ott_incremental_viewers) AS incr_viewers,
+                                        SUM(ott_total_viewers) AS total_viewers,
+                                        ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
+                                    FROM locality_dev.bronze.ispot_dma_reports_ytd
+                                    WHERE {trend_where}
+                                    GROUP BY report_date
+                                    ORDER BY report_date
+                                """)
+
+                                if not trend_df.empty and len(trend_df) > 1:
+                                    # Dual-axis: incrementality % (line) + cumulative impressions (area)
+                                    from plotly.subplots import make_subplots
+                                    fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
+
+                                    fig_trend.add_trace(
+                                        go.Scatter(
+                                            x=trend_df["report_date"],
+                                            y=trend_df["incrementality_pct"],
+                                            name="Incrementality %",
+                                            line=dict(color=COLORS["navy"], width=2.5),
+                                            mode="lines",
+                                        ),
+                                        secondary_y=False,
+                                    )
+                                    fig_trend.add_trace(
+                                        go.Scatter(
+                                            x=trend_df["report_date"],
+                                            y=trend_df["ott_impressions"],
+                                            name="OTT Impressions (cumulative)",
+                                            fill="tozeroy",
+                                            line=dict(color=COLORS["cyan"], width=1),
+                                            fillcolor="rgba(0, 188, 212, 0.15)",
+                                            mode="lines",
+                                        ),
+                                        secondary_y=True,
+                                    )
+
+                                    fig_trend.update_layout(
+                                        height=300,
+                                        margin=dict(t=20, b=40, l=50, r=50),
+                                        legend=dict(orientation="h", y=-0.15),
+                                        paper_bgcolor="rgba(0,0,0,0)",
+                                        plot_bgcolor=COLORS["light_gray"],
+                                        hovermode="x unified",
+                                    )
+                                    fig_trend.update_yaxes(title_text="Incrementality %", secondary_y=False, range=[0, 100])
+                                    fig_trend.update_yaxes(title_text="Impressions", secondary_y=True)
+                                    st.plotly_chart(fig_trend, use_container_width=True)
+                                else:
+                                    st.caption("Not enough data points for trend.")
+                            except Exception as trend_err:
+                                st.caption(f"Trend unavailable: {trend_err}")
                 else:
                     st.caption("\U0001f446 Click a DMA region on the map to see its details.")
 
