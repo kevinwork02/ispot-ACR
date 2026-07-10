@@ -12,27 +12,57 @@ load_dotenv()
 
 st.set_page_config(page_title="iSpot Impression Agent", page_icon="\U0001f4fa", layout="wide")
 
+# ---- Helper: get config from secrets > env > sidebar ----
+def get_secret(key, default=""):
+    """Read from st.secrets first, then env vars, then return default."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, default)
+
+# Pre-load from secrets/.env
+_host = get_secret("DATABRICKS_HOST")
+_token = get_secret("DATABRICKS_TOKEN")
+_warehouse = get_secret("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH")
+_model = get_secret("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
+_has_creds = all([_host, _token, _warehouse])
+
 # ---- Sidebar ----
 with st.sidebar:
     st.title("\U0001f4fa iSpot Agent")
     st.markdown("---")
-    st.subheader("Databricks Connection")
-    db_host = st.text_input("Host", value=os.environ.get("DATABRICKS_HOST", ""))
-    db_token = st.text_input("Token", value=os.environ.get("DATABRICKS_TOKEN", ""), type="password")
-    db_warehouse = st.text_input("SQL Warehouse HTTP Path", value=os.environ.get("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH", ""))
-    st.markdown("---")
-    st.subheader("LLM Settings")
-    llm_provider = st.radio("Provider", ["Databricks FM API", "OpenAI"], index=0)
-    if llm_provider == "Databricks FM API":
-        llm_model = st.text_input("Model", value=os.environ.get("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct"))
-        llm_base_url = f"{db_host}/serving-endpoints"
-        llm_api_key = db_token
+    if _has_creds:
+        st.success("Connected via secrets/env")
+        db_host = _host
+        db_token = _token
+        db_warehouse = _warehouse
+        llm_model = _model
+        with st.expander("Connection Details"):
+            st.text(f"Host: {db_host[:30]}...")
+            st.text(f"Warehouse: ...{db_warehouse[-20:]}")
+            st.text(f"Model: {llm_model}")
     else:
-        llm_model = st.text_input("Model", value="gpt-4o")
-        llm_api_key = st.text_input("API Key", value=os.environ.get("OPENAI_API_KEY", ""), type="password")
-        llm_base_url = "https://api.openai.com/v1"
+        st.subheader("Databricks Connection")
+        db_host = st.text_input("Host", value=_host)
+        db_token = st.text_input("Token", value=_token, type="password")
+        db_warehouse = st.text_input("SQL Warehouse HTTP Path", value=_warehouse)
+        st.markdown("---")
+        st.subheader("LLM Settings")
+        llm_provider = st.radio("Provider", ["Databricks FM API", "OpenAI"], index=0)
+        if llm_provider == "Databricks FM API":
+            llm_model = st.text_input("Model", value=_model)
+        else:
+            llm_model = st.text_input("Model", value="gpt-4o")
     st.markdown("---")
     st.caption("Tables: `locality_dev.bronze.ispot_dma_reports_ytd`, `locality_dev.silver.freewheel_placement_mapping`")
+
+# Resolve LLM endpoint
+if 'llm_provider' not in dir() or llm_provider == "Databricks FM API":
+    llm_base_url = f"{db_host}/serving-endpoints"
+    llm_api_key = db_token
+else:
+    llm_api_key = st.sidebar.text_input("API Key", value=get_secret("OPENAI_API_KEY"), type="password")
+    llm_base_url = "https://api.openai.com/v1"
 
 # ---- System Prompt ----
 SYSTEM_PROMPT = """You are the iSpot Impression Analysis Agent for Locality.
@@ -50,10 +80,8 @@ RULES:
 - Incrementality pct = SUM(ott_incremental_viewers) / NULLIF(SUM(ott_total_viewers), 0)
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
-- Fuzzy match: LOWER(col) LIKE '%term%' for ALL text lookups (brand, category, advertiser, campaign, placement, dma)
+- Fuzzy match: LOWER(col) LIKE '%term%'
 - Use report_date (DATE type) for date filtering. Today is 2026-07-10
-- EVERY SELECT in a UNION ALL must have its own FROM clause
-- Always name the incrementality column as 'incrementality_pct' in output
 
 Respond ONLY in JSON: {"thinking": "...", "sql": "...", "clarification": "...", "assumptions": "..."}"""
 
@@ -83,9 +111,7 @@ def detect_viz_type(df, sql=""):
     if df is None or df.empty:
         return "empty"
     cols = set(c.lower() for c in df.columns)
-    # Incrementality: match various column name patterns
-    incr_cols = [c for c in cols if "incremental" in c and ("pct" in c or "percent" in c or "reach" in c)]
-    if incr_cols or "incrementality_pct" in cols:
+    if "incrementality_pct" in cols:
         return "incrementality"
     if "ott_pct" in cols and "linear_pct" in cols:
         return "media_buying"
@@ -97,6 +123,7 @@ def detect_viz_type(df, sql=""):
 
 
 def render_dashboard(df, sql):
+    """Render dashboard visualizations based on query results."""
     viz_type = detect_viz_type(df, sql)
 
     if viz_type == "incrementality":
@@ -104,54 +131,32 @@ def render_dashboard(df, sql):
             main = df.loc[df["ott_total_viewers"].idxmax()]
         else:
             main = df.iloc[0]
-
-        # Find the pct column flexibly
-        pct_col = next(
-            (c for c in df.columns if "incremental" in c.lower() and ("pct" in c.lower() or "percent" in c.lower() or "reach" in c.lower())),
-            "incrementality_pct"
-        )
-        pct = float(main.get(pct_col, 0))
-        # Handle 0-1 ratio vs 0-100 percentage
-        if 0 < pct < 1:
-            pct = pct * 100
-
+        pct = float(main.get("incrementality_pct", 0))
         incr = main.get("incremental_viewers", main.get("ott_incremental_viewers", 0))
         total = main.get("ott_total_viewers", 0)
 
-        # Confidence flag
-        confidence = main.get("confidence", "")
-        is_low_conf = "low" in str(confidence).lower()
-        conf_note = " (Low-Confidence: device count < 25)" if is_low_conf else ""
-
-        # Green banner
         st.markdown(
             f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
             f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
-            f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.{conf_note}'
+            f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.'
             f'</span></div>',
             unsafe_allow_html=True,
         )
 
-        # Donut + KPIs side by side
-        col_left, col_right = st.columns([1, 3])
-        with col_left:
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        col1.metric("OTT Total Viewers", format_number(total))
+        col2.metric("OTT Incremental", format_number(incr))
+        col3.metric("Incrementality", f"{pct:.0f}%")
+        with col4:
             fig = go.Figure(go.Pie(
                 values=[pct, 100 - pct], hole=0.7,
                 marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
                 textinfo="none", hoverinfo="skip", sort=False))
             fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
-                font_size=28, font_color=COLORS["navy"], showarrow=False)
-            fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
-                height=200, width=200, paper_bgcolor="rgba(0,0,0,0)")
+                font_size=22, font_color=COLORS["navy"], showarrow=False)
+            fig.update_layout(showlegend=False, margin=dict(t=5, b=5, l=5, r=5),
+                height=150, width=150, paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig, use_container_width=False)
-        with col_right:
-            metrics_cols = st.columns(3)
-            metrics_cols[0].metric("Incrementality", f"{pct:.1f}%")
-            if total:
-                metrics_cols[1].metric("OTT Total Viewers", format_number(total))
-            if incr:
-                metrics_cols[2].metric("OTT Incremental", format_number(incr))
-
         if len(df) > 1:
             st.dataframe(df, use_container_width=True)
 
