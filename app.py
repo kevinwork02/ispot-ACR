@@ -50,8 +50,10 @@ RULES:
 - Incrementality pct = SUM(ott_incremental_viewers) / NULLIF(SUM(ott_total_viewers), 0)
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
-- Fuzzy match: LOWER(col) LIKE '%term%'
+- Fuzzy match: LOWER(col) LIKE '%term%' for ALL text lookups (brand, category, advertiser, campaign, placement, dma)
 - Use report_date (DATE type) for date filtering. Today is 2026-07-10
+- EVERY SELECT in a UNION ALL must have its own FROM clause
+- Always name the incrementality column as 'incrementality_pct' in output
 
 Respond ONLY in JSON: {"thinking": "...", "sql": "...", "clarification": "...", "assumptions": "..."}"""
 
@@ -81,7 +83,9 @@ def detect_viz_type(df, sql=""):
     if df is None or df.empty:
         return "empty"
     cols = set(c.lower() for c in df.columns)
-    if "incrementality_pct" in cols:
+    # Incrementality: match various column name patterns
+    incr_cols = [c for c in cols if "incremental" in c and ("pct" in c or "percent" in c or "reach" in c)]
+    if incr_cols or "incrementality_pct" in cols:
         return "incrementality"
     if "ott_pct" in cols and "linear_pct" in cols:
         return "media_buying"
@@ -93,7 +97,6 @@ def detect_viz_type(df, sql=""):
 
 
 def render_dashboard(df, sql):
-    """Render dashboard visualizations based on query results."""
     viz_type = detect_viz_type(df, sql)
 
     if viz_type == "incrementality":
@@ -101,32 +104,54 @@ def render_dashboard(df, sql):
             main = df.loc[df["ott_total_viewers"].idxmax()]
         else:
             main = df.iloc[0]
-        pct = float(main.get("incrementality_pct", 0))
+
+        # Find the pct column flexibly
+        pct_col = next(
+            (c for c in df.columns if "incremental" in c.lower() and ("pct" in c.lower() or "percent" in c.lower() or "reach" in c.lower())),
+            "incrementality_pct"
+        )
+        pct = float(main.get(pct_col, 0))
+        # Handle 0-1 ratio vs 0-100 percentage
+        if 0 < pct < 1:
+            pct = pct * 100
+
         incr = main.get("incremental_viewers", main.get("ott_incremental_viewers", 0))
         total = main.get("ott_total_viewers", 0)
 
+        # Confidence flag
+        confidence = main.get("confidence", "")
+        is_low_conf = "low" in str(confidence).lower()
+        conf_note = " (Low-Confidence: device count < 25)" if is_low_conf else ""
+
+        # Green banner
         st.markdown(
             f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
             f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
-            f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.'
+            f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.{conf_note}'
             f'</span></div>',
             unsafe_allow_html=True,
         )
 
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-        col1.metric("OTT Total Viewers", format_number(total))
-        col2.metric("OTT Incremental", format_number(incr))
-        col3.metric("Incrementality", f"{pct:.0f}%")
-        with col4:
+        # Donut + KPIs side by side
+        col_left, col_right = st.columns([1, 3])
+        with col_left:
             fig = go.Figure(go.Pie(
                 values=[pct, 100 - pct], hole=0.7,
                 marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
                 textinfo="none", hoverinfo="skip", sort=False))
             fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
-                font_size=22, font_color=COLORS["navy"], showarrow=False)
-            fig.update_layout(showlegend=False, margin=dict(t=5, b=5, l=5, r=5),
-                height=150, width=150, paper_bgcolor="rgba(0,0,0,0)")
+                font_size=28, font_color=COLORS["navy"], showarrow=False)
+            fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
+                height=200, width=200, paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig, use_container_width=False)
+        with col_right:
+            metrics_cols = st.columns(3)
+            metrics_cols[0].metric("Incrementality", f"{pct:.1f}%")
+            if total:
+                metrics_cols[1].metric("OTT Total Viewers", format_number(total))
+            if incr:
+                metrics_cols[2].metric("OTT Incremental", format_number(incr))
+
         if len(df) > 1:
             st.dataframe(df, use_container_width=True)
 
