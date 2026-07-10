@@ -77,7 +77,7 @@ RULES:
 - NEVER sum reach or frequency columns (ratios). Recompute: avg_freq = SUM(impressions)/SUM(viewers)
 - Impressions and viewers ARE additive (safe to SUM)
 - Deduplication: combined = OTT + Linear - Overlap. Use all_viewers for deduped count
-- Incrementality pct = CAST(SUM(ott_incremental_viewers) AS DOUBLE) / NULLIF(SUM(ott_total_viewers), 0)  -- MUST CAST to DOUBLE to avoid integer division returning 0
+- Incrementality pct = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct  -- multiply by 100.0 forces DOUBLE and returns percentage directly
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
 - Fuzzy match: LOWER(col) LIKE '%term%'
@@ -132,37 +132,65 @@ def render_dashboard(df, sql):
     viz_type = detect_viz_type(df, sql)
 
     if viz_type == "incrementality":
-        if len(df) > 1 and "ott_total_viewers" in df.columns:
-            main = df.loc[df["ott_total_viewers"].idxmax()]
-        else:
-            main = df.iloc[0]
-        pct = float(main.get("incrementality_pct", 0))
-        incr = main.get("incremental_viewers", main.get("ott_incremental_viewers", 0))
-        total = main.get("ott_total_viewers", 0)
+        try:
+            if len(df) > 1 and "ott_total_viewers" in df.columns:
+                main = df.loc[df["ott_total_viewers"].idxmax()]
+            else:
+                main = df.iloc[0]
 
-        st.markdown(
-            f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
-            f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
-            f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.'
-            f'</span></div>',
-            unsafe_allow_html=True,
-        )
+            # Find incrementality pct column flexibly
+            pct_col = next(
+                (c for c in df.columns if "incremental" in c.lower() and ("pct" in c.lower() or "percent" in c.lower() or "ratio" in c.lower())),
+                "incrementality_pct"
+            )
+            pct = float(main.get(pct_col, 0))
+            incr = main.get("incremental_viewers", main.get("ott_incremental_viewers", 0))
+            total = main.get("ott_total_viewers", 0)
 
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-        col1.metric("OTT Total Viewers", format_number(total))
-        col2.metric("OTT Incremental", format_number(incr))
-        col3.metric("Incrementality", f"{pct:.0f}%")
-        with col4:
-            fig = go.Figure(go.Pie(
-                values=[pct, 100 - pct], hole=0.7,
-                marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
-                textinfo="none", hoverinfo="skip", sort=False))
-            fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
-                font_size=22, font_color=COLORS["navy"], showarrow=False)
-            fig.update_layout(showlegend=False, margin=dict(t=5, b=5, l=5, r=5),
-                height=150, width=150, paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=False)
-        if len(df) > 1:
+            # Fix integer division: if pct=0 but viewers exist, compute client-side
+            if pct == 0 and total and incr:
+                pct = float(incr) / float(total) * 100
+            # Handle 0-1 ratio (some SQL returns 0.25 instead of 25)
+            elif 0 < pct < 1:
+                pct = pct * 100
+
+            # Confidence flag
+            confidence = str(main.get("confidence", ""))
+            conf_note = " (Low-Confidence)" if "low" in confidence.lower() else ""
+
+            # Lime banner
+            st.markdown(
+                f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
+                f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
+                f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.{conf_note}'
+                f'</span></div>',
+                unsafe_allow_html=True,
+            )
+
+            # Donut + KPI cards
+            col_chart, col_kpis = st.columns([1, 3])
+            with col_chart:
+                fig = go.Figure(go.Pie(
+                    values=[pct, 100 - pct], hole=0.7,
+                    marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
+                    textinfo="none", hoverinfo="skip", sort=False))
+                fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
+                    font_size=28, font_color=COLORS["navy"], showarrow=False)
+                fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
+                    height=200, width=200, paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=False)
+            with col_kpis:
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Incrementality", f"{pct:.1f}%")
+                if total:
+                    m2.metric("OTT Total Viewers", format_number(total))
+                if incr:
+                    m3.metric("OTT Incremental", format_number(incr))
+
+            if len(df) > 1:
+                st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.error(f"Visualization error: {e}")
             st.dataframe(df, use_container_width=True)
 
     elif viz_type == "media_buying":
