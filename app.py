@@ -486,19 +486,6 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         # Sort by incrementality %
         display_dma = dma_df.sort_values("incrementality_pct", ascending=False).head(20)
 
-        # Color gradient: navy (high incrementality) → light_cyan (low)
-        pct_vals = display_dma["incrementality_pct"].fillna(0)
-        pct_min, pct_max = pct_vals.min(), pct_vals.max()
-        if pct_max == pct_min:
-            bar_colors = [COLORS["cyan"]] * len(display_dma)
-        else:
-            import plotly.colors as pc
-            colorscale = [[0, COLORS["light_cyan"]], [0.5, COLORS["cyan"]], [1.0, COLORS["navy"]]]
-            normalized = (pct_vals - pct_min) / (pct_max - pct_min)
-            bar_colors = [
-                pc.sample_colorscale(colorscale, [v])[0] for v in normalized
-            ]
-
         # Bar labels: incrementality % + impressions
         bar_labels = display_dma.apply(
             lambda r: f"{r['incrementality_pct']:.0f}%  |  {format_number(r['ott_impressions'])} imp"
@@ -507,8 +494,14 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         )
 
         fig = go.Figure(go.Bar(
-            y=display_dma["dma"], x=display_dma["incrementality_pct"], orientation="h",
-            marker_color=bar_colors,
+            y=display_dma["dma"],
+            x=display_dma["incrementality_pct"],
+            orientation="h",
+            marker=dict(
+                color=display_dma["incrementality_pct"].tolist(),
+                colorscale=[[0, COLORS["light_cyan"]], [0.5, COLORS["cyan"]], [1.0, COLORS["navy"]]],
+                showscale=False,
+            ),
             text=bar_labels,
             textposition="outside"))
         fig.update_layout(
