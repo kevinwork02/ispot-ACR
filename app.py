@@ -1,4 +1,5 @@
 import os
+import re
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,14 +31,13 @@ VIEW = "locality_dev.silver.ispot_dma_reports_latest"
 MAPPING = "locality_dev.silver.freewheel_placement_mapping"
 
 
+# ---- LLM Client ----
 def get_llm_client():
     host = db_host.rstrip("/").replace("https://", "").replace("http://", "")
-    return OpenAI(
-        api_key=db_token,
-        base_url=f"https://{host}/serving-endpoints",
-    )
+    return OpenAI(api_key=db_token, base_url=f"https://{host}/serving-endpoints")
 
 
+# ---- SQL Runner ----
 def run_query(sql):
     conn = dbsql.connect(
         server_hostname=db_host.replace("https://", "").replace("http://", ""),
@@ -53,6 +53,7 @@ def run_query(sql):
         conn.close()
 
 
+# ---- Helpers ----
 def format_number(n):
     if n is None or pd.isna(n):
         return "\u2014"
@@ -63,8 +64,8 @@ def format_number(n):
     return f"{n:,.0f}"
 
 
-def generate_insights(brand, campaign_label, metrics, dma_df, selected_dmas_count):
-    """Use LLM to generate an executive summary of the campaign performance."""
+def generate_insights(brand, campaign_label, metrics, dma_df, dma_count):
+    """Use LLM to generate an executive summary of campaign performance."""
     m = metrics
     pct = float(m.get("incrementality_pct", 0) or 0)
     ott_imp = float(m.get("ott_only_impressions", 0) or 0)
@@ -75,7 +76,6 @@ def generate_insights(brand, campaign_label, metrics, dma_df, selected_dmas_coun
     ott_freq = float(m.get("ott_avg_frequency", 0) or 0)
     lin_freq = float(m.get("linear_avg_frequency", 0) or 0)
 
-    # Top/bottom DMAs
     top_dmas = ""
     bottom_dmas = ""
     if dma_df is not None and not dma_df.empty and "incrementality_pct" in dma_df.columns:
@@ -91,7 +91,7 @@ Be specific with numbers. Highlight what's notable (good or concerning).
 
 Brand: {brand}
 Campaign: {campaign_label}
-DMAs Analyzed: {selected_dmas_count}
+DMAs Analyzed: {dma_count}
 
 KEY METRICS:
 - Incrementality: {pct:.1f}% (OTT viewers NOT reached by linear TV)
@@ -106,7 +106,7 @@ KEY METRICS:
 TOP PERFORMING DMAs: {top_dmas or 'N/A'}
 LOWEST PERFORMING DMAs: {bottom_dmas or 'N/A'}
 
-Write the summary now. Be direct, data-driven, and actionable. No bullet points — flowing prose only."""
+Write the summary now. Be direct, data-driven, and actionable. No bullet points - flowing prose only."""
 
     try:
         client = get_llm_client()
@@ -116,15 +116,14 @@ Write the summary now. Be direct, data-driven, and actionable. No bullet points 
                 {"role": "system", "content": "You are a concise advertising analytics expert. Write executive summaries that highlight key takeaways and actionable insights."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=400,
-            temperature=0.3,
+            max_tokens=400, temperature=0.3,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"_Insights unavailable: {e}_"
 
 
-# ---- Sidebar: Connection Status ----
+# ---- Sidebar ----
 with st.sidebar:
     st.title("\U0001f4fa iSpot Analysis")
     if all([db_host, db_token, db_warehouse]):
@@ -133,12 +132,14 @@ with st.sidebar:
         st.error("Missing credentials in secrets/.env")
         st.stop()
 
-# ---- Check connection ----
 if not all([db_host, db_token, db_warehouse]):
     st.warning("Configure credentials.")
     st.stop()
 
-# ---- Step 1: Brand Selection (Required) ----
+
+# ==============================================================
+# STEP 1: BRAND SELECTION (Required)
+# ==============================================================
 st.title("\U0001f4fa iSpot Impression Analysis")
 st.caption("Select filters to generate your campaign performance report.")
 
@@ -162,54 +163,59 @@ if not selected_brand:
     st.info("\u2191 Select a brand to continue.")
     st.stop()
 
-# ---- Step 2: Campaign Selection (Optional) ----
+
+# ==============================================================
+# STEP 2: CAMPAIGN SELECTION (Optional)
+# ==============================================================
 st.markdown("---")
 st.subheader("2. Select Campaign (optional)")
 
 @st.cache_data(ttl=300)
 def get_campaigns(brand):
-    """Get campaigns with names from the mapping table."""
+    brand_esc = brand.replace("'", "''")
     df = run_query(f"""
         SELECT
             v.campaign_id,
-            COALESCE(m.locality_campaign, CONCAT('Campaign ', v.campaign_id)) AS campaign_name,
+            COALESCE(MAX(m.locality_campaign), CONCAT('Campaign ', v.campaign_id)) AS campaign_name,
             SUM(v.ott_total_impressions) AS ott_imp
         FROM {VIEW} v
         LEFT JOIN {MAPPING} m
             ON v.campaign_id = CAST(m.locality_campaign_id AS BIGINT)
-        WHERE LOWER(v.brand) = LOWER(\'{brand.replace(chr(39), chr(39)+chr(39))}\')
-        GROUP BY v.campaign_id, COALESCE(m.locality_campaign, CONCAT('Campaign ', v.campaign_id))
+        WHERE LOWER(v.brand) = LOWER('{brand_esc}')
+        GROUP BY v.campaign_id
         ORDER BY ott_imp DESC
     """)
     return df
 
 campaigns_df = get_campaigns(selected_brand)
-# Build display labels: "Campaign Name (ID: 12345)"
 campaign_labels = ["All Campaigns"] + [
     f"{row['campaign_name']} (ID: {row['campaign_id']})"
     for _, row in campaigns_df.iterrows()
 ]
 selected_campaign_label = st.selectbox("Campaign", campaign_labels)
 
-# Extract campaign_id from selection
 selected_campaign_id = None
 if selected_campaign_label != "All Campaigns":
     idx = campaign_labels.index(selected_campaign_label) - 1
     selected_campaign_id = int(campaigns_df.iloc[idx]["campaign_id"])
 
-# Build base WHERE clause
+# Build WHERE clause
 brand_escaped = selected_brand.replace("'", "''")
-where_clauses = [f"LOWER(brand) = LOWER(\'{brand_escaped}\')"]
+where_clauses = [f"LOWER(brand) = LOWER('{brand_escaped}')"]
 if selected_campaign_id is not None:
     where_clauses.append(f"campaign_id = {selected_campaign_id}")
 
-# ---- Step 3: DMA Selection ----
+
+# ==============================================================
+# STEP 3: DMA SELECTION
+# ==============================================================
 st.markdown("---")
 st.subheader("3. DMA Breakout")
 
 @st.cache_data(ttl=300)
 def get_dmas(brand, campaign_id=None):
-    where = f"LOWER(brand) = LOWER(\'{brand.replace(chr(39), chr(39)+chr(39))}\')"
+    brand_esc = brand.replace("'", "''")
+    where = f"LOWER(brand) = LOWER('{brand_esc}')"
     if campaign_id:
         where += f" AND campaign_id = {campaign_id}"
     df = run_query(f"""
@@ -232,10 +238,13 @@ if dma_choice == "Select Specific DMAs":
     if not selected_dmas:
         st.warning("Select at least one DMA.")
         st.stop()
-    dma_list = ", ".join(f"\'{d.replace(chr(39), chr(39)+chr(39))}\'" for d in selected_dmas)
+    dma_list = ", ".join(f"'{d.replace(chr(39), chr(39)+chr(39))}'" for d in selected_dmas)
     where_clauses.append(f"dma IN ({dma_list})")
 
-# ---- Step 4: Date Range ----
+
+# ==============================================================
+# STEP 4: DATE RANGE
+# ==============================================================
 st.markdown("---")
 st.subheader("4. Date Range")
 date_choice = st.radio("Analysis period", ["Full Campaign (all available data)", "Custom Date Range"], horizontal=True)
@@ -246,16 +255,18 @@ if date_choice == "Custom Date Range":
         start_date = st.date_input("Start Date")
     with col2:
         end_date = st.date_input("End Date")
-    where_clauses.append(f"report_date >= \'{start_date}\'")
-    where_clauses.append(f"report_date <= \'{end_date}\'")
+    where_clauses.append(f"report_date >= '{start_date}'")
+    where_clauses.append(f"report_date <= '{end_date}'")
 
-# ---- Generate Report ----
+
+# ==============================================================
+# GENERATE REPORT
+# ==============================================================
 st.markdown("---")
 where_sql = " AND ".join(where_clauses)
 
 if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=True):
     with st.spinner("Querying data..."):
-        # Main metrics query
         metrics_df = run_query(f"""
             SELECT
                 SUM(ott_incremental_impressions) AS ott_only_impressions,
@@ -275,7 +286,6 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             WHERE {where_sql}
         """)
 
-        # DMA breakdown
         dma_df = run_query(f"""
             SELECT dma,
                 SUM(ott_total_impressions) AS ott_impressions,
@@ -295,9 +305,19 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     m = metrics_df.iloc[0]
     pct = float(m["incrementality_pct"] or 0)
 
+    # Store in session state for follow-up chat
+    st.session_state["report_context"] = {
+        "brand": selected_brand,
+        "campaign": selected_campaign_label if selected_campaign_label != "All Campaigns" else "All Campaigns",
+        "dma_count": len(selected_dmas),
+        "where_sql": where_sql,
+        "metrics": m.to_dict(),
+        "dma_data": dma_df.to_dict(orient="records") if not dma_df.empty else [],
+    }
+
     # ---- RENDER DASHBOARD ----
-    campaign_display = selected_campaign_label if selected_campaign_label != "All Campaigns" else "All Campaigns"
-    st.markdown(f"### {selected_brand} — {campaign_display}")
+    campaign_display = st.session_state["report_context"]["campaign"]
+    st.markdown(f"### {selected_brand} \u2014 {campaign_display}")
 
     # Incrementality Banner
     st.markdown(
@@ -397,7 +417,7 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             campaign_label=campaign_display,
             metrics=m.to_dict(),
             dma_df=dma_df,
-            selected_dmas_count=len(selected_dmas),
+            dma_count=len(selected_dmas),
         )
     st.markdown(
         f'<div style="background:{COLORS["light_gray"]}; border-left:4px solid {COLORS["cyan"]}; '
@@ -405,3 +425,85 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         f'{insights}</div>',
         unsafe_allow_html=True,
     )
+
+
+# ==============================================================
+# FOLLOW-UP CHAT (persists after report generation)
+# ==============================================================
+if "report_context" in st.session_state:
+    ctx = st.session_state["report_context"]
+
+    st.markdown("---")
+    st.markdown("#### \U0001f4ac Ask a Follow-Up Question")
+    st.caption("e.g. 'Which DMA had the highest incrementality?', 'Show me only DMAs above 50%', 'How does this compare to the brand average?'")
+
+    # Initialize chat history
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # Display chat history
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input
+    if follow_up := st.chat_input("Ask about this campaign's performance..."):
+        st.session_state["chat_history"].append({"role": "user", "content": follow_up})
+        with st.chat_message("user"):
+            st.markdown(follow_up)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # Build context-aware system prompt for follow-ups
+                dma_preview = pd.DataFrame(ctx["dma_data"]).head(10).to_string(index=False) if ctx["dma_data"] else "No DMA data"
+                chat_system = f"""You are an advertising analytics expert at Locality.
+The user is viewing a campaign performance report with these filters:
+- Brand: {ctx['brand']}
+- Campaign: {ctx['campaign']}
+- DMAs: {ctx['dma_count']} markets
+- SQL filter applied: WHERE {ctx['where_sql']}
+
+Current metrics (already computed):
+{pd.Series(ctx['metrics']).to_string()}
+
+DMA breakdown (top rows):
+{dma_preview}
+
+RULES:
+- If you can answer from the data above, answer directly with specific numbers.
+- If you need additional data, output a single SQL query wrapped in ```sql ... ``` fences.
+- SQL must query: {VIEW} and include WHERE {ctx['where_sql']} as a base filter.
+- For mapping fields (advertiser, agency, placement), LEFT JOIN {MAPPING} ON campaign_id = CAST(locality_campaign_id AS BIGINT)
+- ALWAYS use LOWER(col) LIKE '%term%' for text filters. Never use =.
+- Be concise and data-driven. Use actual numbers, not vague language."""
+
+                messages = [{"role": "system", "content": chat_system}]
+                messages += [{"role": m["role"], "content": m["content"]} for m in st.session_state["chat_history"]]
+
+                try:
+                    client = get_llm_client()
+                    response = client.chat.completions.create(
+                        model=llm_model, messages=messages,
+                        max_tokens=1000, temperature=0.2,
+                    )
+                    answer = response.choices[0].message.content.strip()
+
+                    # If LLM generated SQL, execute it and show results
+                    sql_match = re.search(r'```sql\s*(.+?)```', answer, re.DOTALL)
+                    if sql_match:
+                        extra_sql = sql_match.group(1).strip()
+                        try:
+                            extra_df = run_query(extra_sql)
+                            if not extra_df.empty:
+                                st.dataframe(extra_df, use_container_width=True)
+                            answer = re.sub(r'```sql\s*.+?```', '', answer, flags=re.DOTALL).strip()
+                        except Exception as sql_err:
+                            answer += f"\n\n_SQL execution failed: {sql_err}_"
+
+                    st.markdown(answer)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": answer})
+
+                except Exception as e:
+                    err_msg = f"Error: {e}"
+                    st.error(err_msg)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": err_msg})
