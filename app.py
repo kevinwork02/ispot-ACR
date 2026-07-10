@@ -73,11 +73,30 @@ TABLES:
 2. locality_dev.silver.freewheel_placement_mapping (dimension: placement metadata)
 JOIN: fact.campaign_id = CAST(mapping.locality_campaign_id AS BIGINT) -- LEFT JOIN always
 
+CRITICAL DATA STRUCTURE:
+This table has CUMULATIVE YTD snapshots per report_date (NOT daily incremental).
+Each report_date shows the running total from campaign start to that date.
+- NEVER sum across multiple report_dates (this multiply-counts impressions!)
+- ALWAYS filter to latest report_date for the brand/campaign:
+  report_date = (SELECT MAX(report_date) FROM locality_dev.bronze.ispot_dma_reports_ytd WHERE <same filters>)
+- Same rows appear from multiple source files. ALWAYS deduplicate with DISTINCT (exclude source_file):
+  WITH deduped AS (
+    SELECT DISTINCT brand, brand_id, campaign_id, dma, dma_id, report_date,
+      ott_incremental_impressions, ott_total_impressions, linear_only_impressions,
+      linear_total_impressions, total_impressions,
+      ott_incremental_viewers, ott_total_viewers, overlap_viewers,
+      linear_viewers, linear_only_viewers, all_viewers,
+      ott_device_count_lt_25, linear_device_count_lt_25
+    FROM locality_dev.bronze.ispot_dma_reports_ytd
+    WHERE <filters> AND report_date = (SELECT MAX(report_date) FROM locality_dev.bronze.ispot_dma_reports_ytd WHERE <same filters>)
+  )
+  SELECT ... FROM deduped ...
+
 RULES:
 - NEVER sum reach or frequency columns (ratios). Recompute: avg_freq = SUM(impressions)/SUM(viewers)
-- Impressions and viewers ARE additive (safe to SUM)
+- Impressions and viewers ARE additive within a SINGLE report_date snapshot (safe to SUM after dedup)
 - Deduplication: combined = OTT + Linear - Overlap. Use all_viewers for deduped count
-- Incrementality pct = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct  -- multiply by 100.0 forces DOUBLE and returns percentage directly
+- Incrementality pct = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
 - Fuzzy match: LOWER(col) LIKE '%term%'
