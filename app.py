@@ -99,7 +99,7 @@ RULES:
 - Incrementality pct = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
-- Fuzzy match: LOWER(col) LIKE '%term%'
+- Fuzzy match: NEVER use = for text columns. ALWAYS use LOWER(col) LIKE '%term%' for brand, dma, advertiser, campaign, category
 - Use report_date (DATE type) for date filtering. Today is 2026-07-10
 - EVERY SELECT in a UNION ALL must have its own FROM clause
 - Always alias the incrementality percentage column as 'incrementality_pct' in your output
@@ -294,18 +294,40 @@ def execute_sql(query):
 
 
 def parse_response(raw):
+    """Parse LLM JSON response robustly — handles code fences, unescaped newlines, etc."""
+    # Strip markdown code fences
     cleaned = re.sub(r"```json\s*", "", raw)
     cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+
+    # Attempt 1: direct parse
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group())
-            except Exception:
-                pass
-        return {"thinking": "parse error", "sql": None, "clarification": raw}
+        pass
+
+    # Attempt 2: collapse newlines (LLM often puts literal newlines in SQL strings)
+    collapsed = cleaned.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    try:
+        return json.loads(collapsed)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: regex extract the JSON object
+    m = re.search(r'\{.*\}', raw, re.DOTALL)
+    if m:
+        candidate = m.group().replace('\n', ' ').replace('\r', ' ')
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Attempt 4: extract SQL directly with regex (last resort)
+    sql_match = re.search(r'"sql"\s*:\s*"(.*?)"\s*[,}]', raw, re.DOTALL)
+    if sql_match:
+        sql_val = sql_match.group(1).replace('\n', ' ').strip()
+        return {"thinking": "extracted via regex", "sql": sql_val, "clarification": None, "assumptions": None}
+
+    return {"thinking": "parse error", "sql": None, "clarification": raw}
 
 
 def empty_result_fallback(sql):
