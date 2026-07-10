@@ -528,65 +528,110 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
         st.plotly_chart(fig, use_container_width=True)
 
-        # DMA Heatmap (choropleth) — show when multiple DMAs selected
+        # DMA Heatmap — bubble map colored by incrementality %
         if len(dma_df) > 1 and "dma_id" in dma_df.columns:
             st.markdown("#### Geography Heatmap")
-            st.caption("Incrementality % by DMA region")
+            st.caption("Incrementality % by DMA region (bubble size = impressions)")
             try:
-                import urllib.request, json as json_mod
-                DMA_GEOJSON_URL = "https://raw.githubusercontent.com/simzou/nielsen-dma/master/nielsendma.json"
+                # Nielsen DMA approximate centroids (lat, lon) by dma_id
+                DMA_COORDS = {
+                    500:(38.9,-77.0),501:(40.7,-74.0),502:(39.1,-76.8),503:(42.8,-73.8),504:(42.4,-71.1),
+                    505:(42.9,-83.2),506:(41.5,-71.4),507:(37.3,-79.4),508:(39.3,-76.6),510:(41.5,-81.7),
+                    511:(38.9,-77.0),512:(43.1,-77.6),513:(37.6,-77.5),514:(35.1,-80.8),515:(36.1,-79.8),
+                    516:(36.8,-76.0),517:(35.8,-78.6),518:(35.6,-82.6),519:(32.8,-79.9),520:(33.5,-81.7),
+                    521:(28.5,-81.4),522:(30.3,-81.7),523:(40.5,-74.2),524:(33.7,-84.4),525:(27.9,-82.5),
+                    526:(42.1,-72.6),527:(40.8,-74.1),528:(25.8,-80.2),529:(38.6,-90.2),530:(34.7,-86.6),
+                    531:(32.3,-90.2),532:(26.1,-80.1),533:(41.1,-80.8),534:(34.8,-82.4),535:(42.3,-83.0),
+                    536:(37.0,-86.2),537:(40.4,-79.9),539:(27.3,-82.5),540:(28.0,-81.7),541:(37.1,-80.6),
+                    542:(29.8,-95.4),543:(34.2,-77.9),544:(35.2,-81.3),545:(36.1,-80.3),546:(37.5,-77.5),
+                    547:(38.3,-81.6),548:(26.7,-80.1),549:(29.3,-98.5),550:(38.0,-84.5),551:(36.2,-86.8),
+                    552:(43.2,-71.5),553:(35.0,-85.3),554:(42.5,-89.0),555:(38.8,-89.6),556:(39.8,-84.2),
+                    557:(36.8,-76.3),558:(35.1,-89.9),559:(35.0,-80.8),560:(33.4,-86.8),561:(30.4,-87.2),
+                    563:(38.2,-85.8),564:(32.5,-84.9),565:(30.3,-87.7),566:(29.4,-98.5),567:(34.0,-81.0),
+                    569:(33.3,-80.0),570:(39.1,-84.5),571:(35.6,-88.8),573:(32.5,-93.7),574:(27.8,-97.4),
+                    575:(34.7,-79.9),576:(33.2,-87.5),577:(36.8,-83.3),581:(30.4,-88.9),582:(30.2,-92.0),
+                    583:(32.5,-92.1),584:(35.4,-97.5),588:(36.2,-95.9),592:(34.2,-79.8),
+                    # Major markets
+                    602:(41.9,-87.6),603:(44.9,-93.3),604:(38.6,-90.2),605:(35.0,-85.3),
+                    606:(30.5,-91.1),609:(38.2,-85.7),610:(44.5,-88.0),611:(45.5,-94.2),
+                    612:(38.8,-89.6),613:(44.9,-93.3),616:(38.6,-90.2),617:(44.0,-88.5),
+                    618:(29.8,-95.4),619:(42.0,-87.8),620:(42.7,-73.7),622:(30.5,-91.2),
+                    623:(32.8,-96.8),624:(36.1,-95.9),625:(29.4,-98.5),626:(31.8,-106.4),
+                    627:(34.7,-92.3),628:(34.0,-81.0),630:(35.1,-89.9),631:(35.1,-80.8),
+                    632:(30.3,-81.7),633:(38.0,-84.5),634:(32.3,-86.3),635:(30.2,-81.7),
+                    636:(29.6,-95.4),637:(38.3,-81.6),638:(34.7,-86.6),639:(30.4,-87.2),
+                    640:(28.0,-81.7),641:(29.8,-90.0),642:(33.4,-86.8),643:(38.3,-85.8),
+                    644:(39.8,-84.2),647:(35.6,-82.6),648:(35.8,-78.6),649:(35.0,-85.3),
+                    650:(35.4,-97.5),651:(36.2,-95.9),652:(36.1,-86.8),656:(33.5,-80.8),
+                    657:(35.0,-78.9),658:(36.8,-76.3),659:(37.0,-80.0),661:(37.7,-79.4),
+                    662:(30.2,-92.0),669:(36.8,-83.3),670:(36.1,-79.8),671:(36.8,-76.0),
+                    673:(42.3,-83.0),675:(41.1,-80.8),676:(38.6,-90.2),678:(35.0,-82.0),
+                    679:(32.5,-84.9),682:(33.5,-86.8),686:(34.0,-80.9),687:(33.1,-80.0),
+                    691:(34.7,-86.6),692:(34.2,-77.9),693:(36.4,-82.5),698:(32.3,-86.3),
+                    # West
+                    751:(38.6,-121.5),752:(37.8,-122.4),753:(34.1,-118.2),754:(47.6,-122.3),
+                    755:(39.7,-104.9),756:(45.5,-122.7),757:(33.4,-112.0),758:(36.2,-115.1),
+                    759:(38.8,-104.8),762:(32.7,-117.2),764:(40.8,-111.9),765:(33.4,-112.0),
+                    766:(36.7,-119.8),767:(43.6,-116.2),770:(40.6,-111.9),771:(34.4,-119.7),
+                    773:(44.1,-121.3),789:(47.7,-117.4),790:(46.9,-110.4),798:(48.8,-122.5),
+                    800:(41.2,-111.9),801:(47.0,-122.9),802:(47.6,-117.4),803:(34.1,-118.2),
+                    804:(35.4,-119.0),807:(37.8,-122.4),810:(33.9,-117.6),811:(35.3,-119.0),
+                    813:(32.7,-117.2),819:(47.6,-122.3),820:(45.5,-122.7),821:(44.1,-121.3),
+                    825:(38.6,-121.5),828:(36.7,-119.8),839:(36.2,-115.1),855:(39.7,-104.9),
+                    862:(38.6,-121.5),866:(39.7,-104.9),868:(46.9,-114.0),881:(47.0,-117.4),
+                }
 
-                @st.cache_data(ttl=3600)
-                def load_dma_geojson():
-                    with urllib.request.urlopen(DMA_GEOJSON_URL) as resp:
-                        return json_mod.loads(resp.read().decode())
-
-                geojson = load_dma_geojson()
-
-                # Map our dma_id to GeoJSON feature id field
-                # The GeoJSON uses "dma" as the property with the DMA code
                 map_df = dma_df[["dma", "dma_id", "incrementality_pct", "ott_impressions"]].copy()
-                map_df["dma_id"] = map_df["dma_id"].astype(str)
+                map_df["lat"] = map_df["dma_id"].map(lambda x: DMA_COORDS.get(int(x), (None, None))[0])
+                map_df["lon"] = map_df["dma_id"].map(lambda x: DMA_COORDS.get(int(x), (None, None))[1])
+                map_df = map_df.dropna(subset=["lat", "lon"])
 
-                fig_map = go.Figure(go.Choropleth(
-                    geojson=geojson,
-                    locations=map_df["dma_id"],
-                    z=map_df["incrementality_pct"],
-                    featureidkey="properties.dma",
-                    colorscale=[
-                        [0, COLORS["light_cyan"]],
-                        [0.4, COLORS["lime"]],
-                        [0.7, COLORS["cyan"]],
-                        [1.0, COLORS["navy"]],
-                    ],
-                    colorbar=dict(title="Incr. %", thickness=15),
-                    hovertext=map_df.apply(
-                        lambda r: f"{r['dma']}<br>Incrementality: {r['incrementality_pct']:.0f}%<br>Impressions: {format_number(r['ott_impressions'])}",
-                        axis=1
-                    ),
-                    hoverinfo="text",
-                    marker_line_color=COLORS["cyan"],
-                    marker_line_width=0.5,
-                ))
-                fig_map.update_geos(
-                    scope="usa",
-                    showlakes=False,
-                    bgcolor="rgba(0,0,0,0)",
-                )
-                fig_map.update_layout(
-                    margin=dict(t=10, b=10, l=10, r=10),
-                    height=450,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    geo=dict(bgcolor="rgba(0,0,0,0)"),
-                )
+                if not map_df.empty:
+                    fig_map = go.Figure(go.Scattergeo(
+                        lat=map_df["lat"],
+                        lon=map_df["lon"],
+                        marker=dict(
+                            size=map_df["ott_impressions"].apply(
+                                lambda x: max(8, min(40, (float(x) / map_df["ott_impressions"].max()) * 40))
+                            ),
+                            color=map_df["incrementality_pct"],
+                            colorscale=[
+                                [0, COLORS["light_cyan"]],
+                                [0.4, COLORS["lime"]],
+                                [0.7, COLORS["cyan"]],
+                                [1.0, COLORS["navy"]],
+                            ],
+                            colorbar=dict(title="Incr. %", thickness=12),
+                            opacity=0.8,
+                            line=dict(width=0.5, color="white"),
+                        ),
+                        text=map_df.apply(
+                            lambda r: f"{r['dma']}<br>{r['incrementality_pct']:.0f}% incr.<br>{format_number(r['ott_impressions'])} imp",
+                            axis=1
+                        ),
+                        hoverinfo="text",
+                    ))
+                    fig_map.update_geos(
+                        scope="usa",
+                        showland=True, landcolor=COLORS["light_gray"],
+                        showlakes=False,
+                        showcountries=False,
+                        showsubunits=True, subunitcolor="#ddd",
+                    )
+                    fig_map.update_layout(
+                        margin=dict(t=10, b=10, l=10, r=10),
+                        height=450,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        geo=dict(bgcolor="rgba(0,0,0,0)"),
+                    )
                 # Click-to-filter: capture selected DMA from map
-                event = st.plotly_chart(fig_map, use_container_width=True, on_select="rerun", key="dma_map")
+                    event = st.plotly_chart(fig_map, use_container_width=True, on_select="rerun", key="dma_map")
 
-                # Handle map click selection
-                if event and event.selection and event.selection.points:
-                    clicked_idx = event.selection.points[0].get("pointIndex", None)
-                    if clicked_idx is not None and clicked_idx < len(map_df):
-                        clicked_row = map_df.iloc[clicked_idx]
+                    # Handle map click selection
+                    if event and event.selection and event.selection.points:
+                        clicked_idx = event.selection.points[0].get("pointIndex", None)
+                        if clicked_idx is not None and clicked_idx < len(map_df):
+                            clicked_row = map_df.iloc[clicked_idx]
                         clicked_dma = clicked_row["dma"]
                         clicked_pct = clicked_row["incrementality_pct"]
                         clicked_imp = clicked_row["ott_impressions"]
@@ -670,8 +715,10 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                                     st.caption("Not enough data points for trend.")
                             except Exception as trend_err:
                                 st.caption(f"Trend unavailable: {trend_err}")
+                    else:
+                        st.caption("\U0001f446 Click a DMA region on the map to see its details.")
                 else:
-                    st.caption("\U0001f446 Click a DMA region on the map to see its details.")
+                    st.caption("No geographic coordinates available for selected DMAs.")
 
             except Exception as map_err:
                 st.caption(f"Map unavailable: {map_err}")
