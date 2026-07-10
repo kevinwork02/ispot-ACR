@@ -385,6 +385,19 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             ORDER BY incrementality_pct DESC
         """)
 
+    # Cast Decimal types to float (Databricks SQL returns decimal.Decimal)
+    for col in metrics_df.select_dtypes(include=["object"]).columns:
+        try:
+            metrics_df[col] = pd.to_numeric(metrics_df[col], errors="ignore")
+        except (TypeError, ValueError):
+            pass
+    for col in dma_df.columns:
+        if dma_df[col].dtype == object or "decimal" in str(dma_df[col].dtype).lower():
+            try:
+                dma_df[col] = pd.to_numeric(dma_df[col], errors="ignore")
+            except (TypeError, ValueError):
+                pass
+
     if metrics_df.empty or metrics_df.iloc[0]["ott_total_impressions"] is None:
         st.error("No data found for the selected filters.")
         st.stop()
