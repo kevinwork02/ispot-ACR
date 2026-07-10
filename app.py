@@ -571,7 +571,37 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                     paper_bgcolor="rgba(0,0,0,0)",
                     geo=dict(bgcolor="rgba(0,0,0,0)"),
                 )
-                st.plotly_chart(fig_map, use_container_width=True)
+                # Click-to-filter: capture selected DMA from map
+                event = st.plotly_chart(fig_map, use_container_width=True, on_select="rerun", key="dma_map")
+
+                # Handle map click selection
+                if event and event.selection and event.selection.points:
+                    clicked_idx = event.selection.points[0].get("pointIndex", None)
+                    if clicked_idx is not None and clicked_idx < len(map_df):
+                        clicked_row = map_df.iloc[clicked_idx]
+                        clicked_dma = clicked_row["dma"]
+                        clicked_pct = clicked_row["incrementality_pct"]
+                        clicked_imp = clicked_row["ott_impressions"]
+
+                        # Find full data for clicked DMA
+                        dma_detail = dma_df[dma_df["dma"] == clicked_dma]
+                        if not dma_detail.empty:
+                            d = dma_detail.iloc[0]
+                            st.markdown(
+                                f'<div style="background:{COLORS["light_gray"]}; border-left:4px solid {COLORS["navy"]}; '
+                                f'border-radius:4px; padding:16px 20px; margin:12px 0;">'
+                                f'<span style="font-size:17px; font-weight:700; color:{COLORS["navy"]};">'
+                                f'\U0001f4cd {clicked_dma}</span></div>',
+                                unsafe_allow_html=True,
+                            )
+                            dc1, dc2, dc3, dc4 = st.columns(4)
+                            dc1.metric("Incrementality", f"{clicked_pct:.1f}%")
+                            dc2.metric("OTT Impressions", format_number(clicked_imp))
+                            dc3.metric("OTT Viewers", format_number(d.get("ott_viewers", 0)))
+                            dc4.metric("Incremental Viewers", format_number(d.get("incremental_viewers", 0)))
+                else:
+                    st.caption("\U0001f446 Click a DMA region on the map to see its details.")
+
             except Exception as map_err:
                 st.caption(f"Map unavailable: {map_err}")
 
