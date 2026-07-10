@@ -82,6 +82,9 @@ RULES:
 - LEFT JOIN; label unmapped as 'Unmapped'
 - Fuzzy match: LOWER(col) LIKE '%term%'
 - Use report_date (DATE type) for date filtering. Today is 2026-07-10
+- EVERY SELECT in a UNION ALL must have its own FROM clause
+- Always alias the incrementality percentage column as 'incrementality_pct' in your output
+- Always include ott_incremental_viewers and ott_total_viewers alongside incrementality_pct when computing incrementality
 
 Respond ONLY in JSON: {"thinking": "...", "sql": "...", "clarification": "...", "assumptions": "..."}"""
 
@@ -111,7 +114,9 @@ def detect_viz_type(df, sql=""):
     if df is None or df.empty:
         return "empty"
     cols = set(c.lower() for c in df.columns)
-    if "incrementality_pct" in cols:
+    # Incrementality: match flexible column names
+    has_incr = any("incremental" in c and ("pct" in c or "percent" in c or "ratio" in c) for c in cols)
+    if has_incr or "incrementality_pct" in cols:
         return "incrementality"
     if "ott_pct" in cols and "linear_pct" in cols:
         return "media_buying"
