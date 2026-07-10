@@ -77,7 +77,7 @@ RULES:
 - NEVER sum reach or frequency columns (ratios). Recompute: avg_freq = SUM(impressions)/SUM(viewers)
 - Impressions and viewers ARE additive (safe to SUM)
 - Deduplication: combined = OTT + Linear - Overlap. Use all_viewers for deduped count
-- Incrementality pct = SUM(ott_incremental_viewers) / NULLIF(SUM(ott_total_viewers), 0)
+- Incrementality pct = CAST(SUM(ott_incremental_viewers) AS DOUBLE) / NULLIF(SUM(ott_total_viewers), 0)  -- MUST CAST to DOUBLE to avoid integer division returning 0
 - Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
 - LEFT JOIN; label unmapped as 'Unmapped'
 - Fuzzy match: LOWER(col) LIKE '%term%'
