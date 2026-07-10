@@ -506,6 +506,8 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             axis=1
         )
 
+        pct_max = float(display_dma["incrementality_pct"].max())
+
         fig = go.Figure(go.Bar(
             y=display_dma["dma"],
             x=display_dma["incrementality_pct"],
