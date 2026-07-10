@@ -1,468 +1,301 @@
 import os
-import json
-import re
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from openai import OpenAI
 from databricks import sql as dbsql
 from dotenv import load_dotenv
 
 load_dotenv()
+st.set_page_config(page_title="iSpot Impression Analysis", page_icon="\U0001f4fa", layout="wide")
 
-st.set_page_config(page_title="iSpot Impression Agent", page_icon="\U0001f4fa", layout="wide")
-
-# ---- Helper: get config from secrets > env > sidebar ----
+# ---- Config ----
 def get_secret(key, default=""):
-    """Read from st.secrets first, then env vars, then return default."""
     try:
         return st.secrets[key]
     except (KeyError, FileNotFoundError):
         return os.environ.get(key, default)
 
-# Pre-load from secrets/.env
-_host = get_secret("DATABRICKS_HOST")
-_token = get_secret("DATABRICKS_TOKEN")
-_warehouse = get_secret("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH")
-_model = get_secret("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
-_has_creds = all([_host, _token, _warehouse])
+db_host = get_secret("DATABRICKS_HOST")
+db_token = get_secret("DATABRICKS_TOKEN")
+db_warehouse = get_secret("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH")
 
-# ---- Sidebar ----
-with st.sidebar:
-    st.title("\U0001f4fa iSpot Agent")
-    st.markdown("---")
-    if _has_creds:
-        st.success("Connected via secrets/env")
-        db_host = _host
-        db_token = _token
-        db_warehouse = _warehouse
-        llm_model = _model
-        with st.expander("Connection Details"):
-            st.text(f"Host: {db_host[:30]}...")
-            st.text(f"Warehouse: ...{db_warehouse[-20:]}")
-            st.text(f"Model: {llm_model}")
-    else:
-        st.subheader("Databricks Connection")
-        db_host = st.text_input("Host", value=_host)
-        db_token = st.text_input("Token", value=_token, type="password")
-        db_warehouse = st.text_input("SQL Warehouse HTTP Path", value=_warehouse)
-        st.markdown("---")
-        st.subheader("LLM Settings")
-        llm_provider = st.radio("Provider", ["Databricks FM API", "OpenAI"], index=0)
-        if llm_provider == "Databricks FM API":
-            llm_model = st.text_input("Model", value=_model)
-        else:
-            llm_model = st.text_input("Model", value="gpt-4o")
-    st.markdown("---")
-    st.caption("Tables: `locality_dev.bronze.ispot_dma_reports_ytd`, `locality_dev.silver.freewheel_placement_mapping`")
-
-# Resolve LLM endpoint
-if 'llm_provider' not in dir() or llm_provider == "Databricks FM API":
-    llm_base_url = f"{db_host}/serving-endpoints"
-    llm_api_key = db_token
-else:
-    llm_api_key = st.sidebar.text_input("API Key", value=get_secret("OPENAI_API_KEY"), type="password")
-    llm_base_url = "https://api.openai.com/v1"
-
-# ---- System Prompt ----
-SYSTEM_PROMPT = """You are the iSpot Impression Analysis Agent for Locality.
-You generate SQL against Databricks tables to answer OTT/Linear TV ad performance questions.
-
-TABLES:
-1. locality_dev.silver.ispot_dma_reports_latest (MAIN - pre-deduplicated view, one row per brand+campaign+DMA)
-   Has: brand, campaign_id, dma, all OTT/Linear columns. USE THIS for all brand-level questions.
-   Filter brands: LOWER(brand) LIKE '%term%'. NO JOIN NEEDED for brand lookups.
-
-2. locality_dev.silver.freewheel_placement_mapping (ONLY for campaign/advertiser/category metadata)
-   ONLY JOIN when user asks about specific Locality campaigns, advertisers, or categories.
-   JOIN: view.campaign_id = CAST(mapping.locality_campaign_id AS BIGINT) -- LEFT JOIN
-
-ROUTING (CRITICAL - follow this EVERY time):
-- Brand name mentioned (Honda, Sherwin Williams, Kia, etc) -> query table 1 ONLY by brand. NO JOIN.
-- Campaign/advertiser/category mentioned -> JOIN table 1 to table 2.
-
-CRITICAL DATA STRUCTURE:
-This table has CUMULATIVE YTD snapshots per report_date (NOT daily incremental).
-Each report_date shows the running total from campaign start to that date.
-- NEVER sum across multiple report_dates (this multiply-counts impressions!)
-- ALWAYS filter to latest report_date for the brand/campaign:
-  report_date = (SELECT MAX(report_date) FROM locality_dev.bronze.ispot_dma_reports_ytd WHERE <same filters>)
-- Same rows appear from multiple source files. ALWAYS deduplicate with DISTINCT (exclude source_file):
-  WITH deduped AS (
-    SELECT DISTINCT brand, brand_id, campaign_id, dma, dma_id, report_date,
-      ott_incremental_impressions, ott_total_impressions, linear_only_impressions,
-      linear_total_impressions, total_impressions,
-      ott_incremental_viewers, ott_total_viewers, overlap_viewers,
-      linear_viewers, linear_only_viewers, all_viewers,
-      ott_device_count_lt_25, linear_device_count_lt_25
-    FROM locality_dev.bronze.ispot_dma_reports_ytd
-    WHERE <filters> AND report_date = (SELECT MAX(report_date) FROM locality_dev.bronze.ispot_dma_reports_ytd WHERE <same filters>)
-  )
-  SELECT ... FROM deduped ...
-
-RULES:
-- NEVER sum reach or frequency columns (ratios). Recompute: avg_freq = SUM(impressions)/SUM(viewers)
-- Impressions and viewers ARE additive within a SINGLE report_date snapshot (safe to SUM after dedup)
-- Deduplication: combined = OTT + Linear - Overlap. Use all_viewers for deduped count
-- Incrementality pct = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
-- Flag ott_device_count_lt_25=True or linear_device_count_lt_25=True as low-confidence
-- LEFT JOIN; label unmapped as 'Unmapped'
-- Fuzzy match: NEVER use = for text columns. ALWAYS use LOWER(col) LIKE '%term%' for brand, dma, advertiser, campaign, category
-- Use report_date (DATE type) for date filtering. Today is 2026-07-10
-- EVERY SELECT in a UNION ALL must have its own FROM clause
-- Always alias the incrementality percentage column as 'incrementality_pct' in your output
-- Always include ott_incremental_viewers and ott_total_viewers alongside incrementality_pct when computing incrementality
-
-Respond ONLY in JSON: {"thinking": "...", "sql": "...", "clarification": "...", "assumptions": "..."}"""
-
-# ---- Locality Brand Colors ----
 COLORS = {
-    "navy": "#1B2A4A", "dark_blue": "#003366", "cyan": "#00BCD4",
-    "light_cyan": "#80DEEA", "lime": "#C5E063", "white": "#FFFFFF",
-    "light_gray": "#F8F9FA", "mid_gray": "#E0E0E0",
+    "navy": "#1B2A4A", "cyan": "#00BCD4", "light_cyan": "#80DEEA",
+    "lime": "#C5E063", "white": "#FFFFFF", "light_gray": "#F8F9FA", "mid_gray": "#E0E0E0",
 }
 
-
-# ---- Dashboard Visualization ----
-def format_number(n):
-    if n is None or pd.isna(n):
-        return "\u2014"
-    n = float(n)
-    if abs(n) >= 1e9:
-        return f"{n/1e9:.1f}B"
-    elif abs(n) >= 1e6:
-        return f"{n/1e6:.1f}M"
-    elif abs(n) >= 1e3:
-        return f"{n/1e3:.0f}K"
-    return f"{n:,.0f}"
+VIEW = "locality_dev.silver.ispot_dma_reports_latest"
+MAPPING = "locality_dev.silver.freewheel_placement_mapping"
 
 
-def detect_viz_type(df, sql=""):
-    if df is None or df.empty:
-        return "empty"
-    cols = set(c.lower() for c in df.columns)
-    # Incrementality: match flexible column names
-    has_incr = any("incremental" in c and ("pct" in c or "percent" in c or "ratio" in c) for c in cols)
-    if has_incr or "incrementality_pct" in cols:
-        return "incrementality"
-    if "ott_pct" in cols and "linear_pct" in cols:
-        return "media_buying"
-    if "delivery_type" in cols and "avg_frequency" in cols:
-        return "frequency_comparison"
-    if "dma" in cols and len(df) > 1:
-        return "geography"
-    return "table"
-
-
-def render_dashboard(df, sql):
-    """Render dashboard visualizations based on query results."""
-    viz_type = detect_viz_type(df, sql)
-
-    if viz_type == "incrementality":
-        try:
-            if len(df) > 1 and "ott_total_viewers" in df.columns:
-                main = df.loc[df["ott_total_viewers"].idxmax()]
-            else:
-                main = df.iloc[0]
-
-            # Find incrementality pct column flexibly
-            pct_col = next(
-                (c for c in df.columns if "incremental" in c.lower() and ("pct" in c.lower() or "percent" in c.lower() or "ratio" in c.lower())),
-                "incrementality_pct"
-            )
-            pct = float(main.get(pct_col, 0))
-            incr = main.get("incremental_viewers", main.get("ott_incremental_viewers", 0))
-            total = main.get("ott_total_viewers", 0)
-
-            # Fix integer division: if pct=0 but viewers exist, compute client-side
-            if pct == 0 and total and incr:
-                pct = float(incr) / float(total) * 100
-            # Handle 0-1 ratio (some SQL returns 0.25 instead of 25)
-            elif 0 < pct < 1:
-                pct = pct * 100
-
-            # Confidence flag
-            confidence = str(main.get("confidence", ""))
-            conf_note = " (Low-Confidence)" if "low" in confidence.lower() else ""
-
-            # Lime banner
-            st.markdown(
-                f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
-                f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
-                f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.{conf_note}'
-                f'</span></div>',
-                unsafe_allow_html=True,
-            )
-
-            # Donut + KPI cards
-            col_chart, col_kpis = st.columns([1, 3])
-            with col_chart:
-                fig = go.Figure(go.Pie(
-                    values=[pct, 100 - pct], hole=0.7,
-                    marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
-                    textinfo="none", hoverinfo="skip", sort=False))
-                fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
-                    font_size=28, font_color=COLORS["navy"], showarrow=False)
-                fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
-                    height=200, width=200, paper_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=False)
-            with col_kpis:
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Incrementality", f"{pct:.1f}%")
-                if total:
-                    m2.metric("OTT Total Viewers", format_number(total))
-                if incr:
-                    m3.metric("OTT Incremental", format_number(incr))
-
-            if len(df) > 1:
-                st.dataframe(df, use_container_width=True)
-        except Exception as e:
-            st.error(f"Visualization error: {e}")
-            st.dataframe(df, use_container_width=True)
-
-    elif viz_type == "media_buying":
-        row = df.iloc[0]
-        ott_pct = float(row.get("ott_pct", 0))
-        linear_pct = float(row.get("linear_pct", 0))
-        overlap_pct = max(0, 100 - ott_pct - linear_pct)
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            fig = go.Figure(go.Pie(
-                labels=["TV Only", "OTT Only", "OTT + TV"],
-                values=[linear_pct, ott_pct, overlap_pct],
-                marker_colors=[COLORS["light_cyan"], COLORS["navy"], COLORS["cyan"]],
-                textinfo="label+percent", textfont_size=12))
-            fig.update_layout(title="OTT + TV Delivery", showlegend=False,
-                margin=dict(t=40, b=20, l=10, r=10), height=280,
-                paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            st.metric("OTT Only Impressions", format_number(row.get("ott_impressions", 0)))
-            st.metric("TV Only Impressions", format_number(row.get("linear_impressions", 0)))
-            st.metric("Total Impressions", format_number(row.get("total_impressions", 0)))
-
-    elif viz_type == "frequency_comparison":
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            fig = go.Figure()
-            for _, row in df.iterrows():
-                dtype = row.get("delivery_type", "")
-                freq = row.get("avg_frequency", 0)
-                color = COLORS["navy"] if "ott" in str(dtype).lower() else COLORS["light_cyan"]
-                fig.add_trace(go.Bar(x=[dtype], y=[freq], marker_color=color,
-                    text=[f"{freq:.1f}"], textposition="outside",
-                    textfont=dict(size=18, color=COLORS["navy"]), showlegend=False))
-            fig.update_layout(title="Media Average Frequency",
-                yaxis=dict(range=[0, df["avg_frequency"].max() * 1.3]),
-                margin=dict(t=50, b=30, l=40, r=20), height=300,
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            for _, row in df.iterrows():
-                st.metric(f"{row.get('delivery_type', '')} Frequency", f"{row.get('avg_frequency', 0):.1f}")
-
-    elif viz_type == "geography":
-        num_cols = df.select_dtypes(include="number").columns
-        if len(num_cols) > 0:
-            dfs = df.sort_values(num_cols[0], ascending=False).head(15)
-            fig = go.Figure(go.Bar(
-                y=dfs["dma"], x=dfs[num_cols[0]], orientation="h",
-                marker_color=COLORS["cyan"],
-                text=dfs[num_cols[0]].apply(lambda x: format_number(x)),
-                textposition="outside"))
-            fig.update_layout(
-                title=f"Top DMAs by {num_cols[0].replace('_', ' ').title()}",
-                yaxis=dict(autorange="reversed"),
-                margin=dict(t=50, b=30, l=150, r=60), height=max(300, len(dfs) * 32),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.dataframe(df, use_container_width=True)
-    else:
-        if len(df) > 0:
-            st.dataframe(df, use_container_width=True)
-
-
-# ---- SQL & Agent Functions ----
-def execute_sql(query):
+def run_query(sql):
     conn = dbsql.connect(
         server_hostname=db_host.replace("https://", "").replace("http://", ""),
-        http_path=db_warehouse,
-        access_token=db_token,
+        http_path=db_warehouse, access_token=db_token,
     )
     try:
         cur = conn.cursor()
-        cur.execute(query)
+        cur.execute(sql)
         cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-        return pd.DataFrame(rows, columns=cols)
+        return pd.DataFrame(cur.fetchall(), columns=cols)
     finally:
         cur.close()
         conn.close()
 
 
-def parse_response(raw):
-    """Parse LLM JSON response robustly — handles code fences, unescaped newlines, etc."""
-    # Strip markdown code fences
-    cleaned = re.sub(r"```json\s*", "", raw)
-    cleaned = re.sub(r"```\s*$", "", cleaned).strip()
-
-    # Attempt 1: direct parse
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 2: collapse newlines (LLM often puts literal newlines in SQL strings)
-    collapsed = cleaned.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-    try:
-        return json.loads(collapsed)
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 3: regex extract the JSON object
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        candidate = m.group().replace('\n', ' ').replace('\r', ' ')
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-
-    # Attempt 4: extract SQL directly with regex (last resort)
-    sql_match = re.search(r'"sql"\s*:\s*"(.*?)"\s*[,}]', raw, re.DOTALL)
-    if sql_match:
-        sql_val = sql_match.group(1).replace('\n', ' ').strip()
-        return {"thinking": "extracted via regex", "sql": sql_val, "clarification": None, "assumptions": None}
-
-    return {"thinking": "parse error", "sql": None, "clarification": raw}
+def format_number(n):
+    if n is None or pd.isna(n):
+        return "\u2014"
+    n = float(n)
+    if abs(n) >= 1e9: return f"{n/1e9:.1f}B"
+    elif abs(n) >= 1e6: return f"{n/1e6:.1f}M"
+    elif abs(n) >= 1e3: return f"{n/1e3:.0f}K"
+    return f"{n:,.0f}"
 
 
-def empty_result_fallback(sql):
-    fallback_map = {
-        "advertiser_category": "SELECT DISTINCT advertiser_category FROM locality_dev.silver.freewheel_placement_mapping WHERE advertiser_category IS NOT NULL ORDER BY advertiser_category LIMIT 15",
-        "locality_advertiser": "SELECT DISTINCT locality_advertiser FROM locality_dev.silver.freewheel_placement_mapping WHERE locality_advertiser IS NOT NULL ORDER BY locality_advertiser LIMIT 15",
-        "locality_campaign": "SELECT DISTINCT locality_campaign FROM locality_dev.silver.freewheel_placement_mapping WHERE locality_campaign IS NOT NULL ORDER BY locality_campaign LIMIT 15",
-    }
-    sql_lower = sql.lower()
-    for col, query in fallback_map.items():
-        if col in sql_lower:
-            try:
-                df = execute_sql(query)
-                vals = [v for v in df.iloc[:, 0].tolist() if v and str(v) != 'nan']
-                name = col.replace('_', ' ').title()
-                return f"No results for that {name}. Available values:\n" + "\n".join(f"  - {v}" for v in vals)
-            except Exception:
-                pass
-    if "brand" in sql_lower and "like" in sql_lower:
-        try:
-            df = execute_sql("SELECT DISTINCT brand FROM locality_dev.bronze.ispot_dma_reports_ytd WHERE brand IS NOT NULL AND TRIM(brand) != '' ORDER BY brand LIMIT 15")
-            vals = [v for v in df.iloc[:, 0].tolist() if v and str(v) != 'nan']
-            return f"No results for that brand. Available brands:\n" + "\n".join(f"  - {v}" for v in vals)
-        except Exception:
-            pass
-    return None
+# ---- Sidebar: Connection Status ----
+with st.sidebar:
+    st.title("\U0001f4fa iSpot Analysis")
+    if all([db_host, db_token, db_warehouse]):
+        st.success("Connected")
+    else:
+        st.error("Missing credentials in secrets/.env")
+        st.stop()
 
-
-def retry_sql(client, question, bad_sql, error_msg):
-    retry_prompt = f"Fix this SQL. Error: {error_msg[:300]}\nFailed SQL: {bad_sql}\nOriginal question: {question}\nREMINDER: Every SELECT in UNION ALL needs its own FROM clause."
-    resp = client.chat.completions.create(
-        model=llm_model,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": retry_prompt}],
-        max_tokens=2048, temperature=0.0)
-    return parse_response(resp.choices[0].message.content)
-
-
-def get_response(question, history):
-    client = OpenAI(api_key=llm_api_key, base_url=llm_base_url)
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-    msgs.extend(history[-6:])
-    msgs.append({"role": "user", "content": question})
-
-    resp = client.chat.completions.create(model=llm_model, messages=msgs, max_tokens=2048, temperature=0.0)
-    parsed = parse_response(resp.choices[0].message.content)
-
-    result = {"thinking": parsed.get("thinking"), "sql": parsed.get("sql"),
-              "clarification": parsed.get("clarification"), "results": None, "answer": None, "error": None}
-
-    if result["clarification"] and not result["sql"]:
-        result["answer"] = result["clarification"]
-        return result
-
-    if result["sql"]:
-        current_sql = result["sql"]
-        for attempt in range(3):
-            try:
-                df = execute_sql(current_sql)
-                result["sql"] = current_sql
-                result["results"] = df
-                break
-            except Exception as e:
-                if attempt < 2:
-                    fixed = retry_sql(client, question, current_sql, str(e))
-                    current_sql = fixed.get("sql") or current_sql
-                else:
-                    result["error"] = str(e)
-                    result["answer"] = f"Query error after retries: {e}"
-                    return result
-
-        if result["results"] is not None and result["results"].empty:
-            fallback = empty_result_fallback(result["sql"])
-            result["answer"] = fallback or "Query returned 0 rows. Try broadening your search."
-        elif result["results"] is not None:
-            fmt_msg = f"Format these results concisely. Lead with numbers.\nQuestion: {question}\nSQL: {result['sql']}\nResults:\n{df.head(50).to_string(index=False)}"
-            fmt = client.chat.completions.create(
-                model=llm_model,
-                messages=[{"role": "system", "content": "Precise data analyst. Be concise."},
-                          {"role": "user", "content": fmt_msg}],
-                max_tokens=1024, temperature=0.0)
-            result["answer"] = fmt.choices[0].message.content
-    return result
-
-
-# ---- Main Chat UI ----
-st.title("\U0001f4fa iSpot Impression Analysis Agent")
-st.caption("Ask about OTT & Linear TV ad performance: reach, frequency, incrementality, impressions.")
-
-if not all([db_host, db_token, db_warehouse, llm_api_key]):
-    st.warning("Configure connection settings in the sidebar.")
+# ---- Check connection ----
+if not all([db_host, db_token, db_warehouse]):
+    st.warning("Configure credentials.")
     st.stop()
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ---- Step 1: Brand Selection (Required) ----
+st.title("\U0001f4fa iSpot Impression Analysis")
+st.caption("Select filters to generate your campaign performance report.")
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("sql"):
-            with st.expander("SQL Query"):
-                st.code(msg["sql"], language="sql")
-        if msg.get("results") is not None:
-            with st.expander(f"Data ({len(msg['results'])} rows)"):
-                st.dataframe(msg["results"], use_container_width=True)
+st.markdown("---")
+st.subheader("1. Select Brand")
 
-if prompt := st.chat_input("Ask about impressions, reach, frequency..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+@st.cache_data(ttl=300)
+def get_brands():
+    df = run_query(f"""
+        SELECT DISTINCT brand, SUM(ott_total_impressions) as total_ott
+        FROM {VIEW}
+        WHERE brand IS NOT NULL AND TRIM(brand) != \'\'
+        GROUP BY brand HAVING SUM(ott_total_impressions) > 0
+        ORDER BY total_ott DESC
+    """)
+    return df["brand"].tolist()
 
-    with st.chat_message("assistant"):
-        with st.spinner("Analyzing..."):
-            hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
-            result = get_response(prompt, hist)
+brands = get_brands()
+selected_brand = st.selectbox("Brand / Advertiser (required)", [""] + brands, index=0)
 
-        if result["results"] is not None and not result["results"].empty:
-            render_dashboard(result["results"], result.get("sql", ""))
+if not selected_brand:
+    st.info("\u2191 Select a brand to continue.")
+    st.stop()
 
-        st.markdown(result["answer"] or "No response.")
-        if result["sql"]:
-            with st.expander("SQL Query"):
-                st.code(result["sql"], language="sql")
-        if result["results"] is not None:
-            with st.expander(f"Raw Data ({len(result['results'])} rows)"):
-                st.dataframe(result["results"], use_container_width=True)
+# ---- Step 2: Campaign Selection (Optional) ----
+st.markdown("---")
+st.subheader("2. Select Campaign (optional)")
 
-        st.session_state.messages.append({
-            "role": "assistant", "content": result["answer"],
-            "sql": result.get("sql"), "results": result.get("results"),
-        })
+@st.cache_data(ttl=300)
+def get_campaigns(brand):
+    df = run_query(f"""
+        SELECT DISTINCT campaign_id, SUM(ott_total_impressions) as ott_imp
+        FROM {VIEW}
+        WHERE LOWER(brand) = LOWER(\'{brand.replace(chr(39), chr(39)+chr(39))}\')
+        GROUP BY campaign_id
+        ORDER BY ott_imp DESC
+    """)
+    return df
+
+campaigns_df = get_campaigns(selected_brand)
+campaign_options = ["All Campaigns"] + [str(c) for c in campaigns_df["campaign_id"].tolist()]
+selected_campaign = st.selectbox("Campaign ID", campaign_options)
+
+# Build base WHERE clause
+brand_escaped = selected_brand.replace("'", "''")
+where_clauses = [f"LOWER(brand) = LOWER(\'{brand_escaped}\')"]
+if selected_campaign != "All Campaigns":
+    where_clauses.append(f"campaign_id = {selected_campaign}")
+
+# ---- Step 3: DMA Selection ----
+st.markdown("---")
+st.subheader("3. DMA Breakout")
+
+@st.cache_data(ttl=300)
+def get_dmas(brand, campaign_id=None):
+    where = f"LOWER(brand) = LOWER(\'{brand.replace(chr(39), chr(39)+chr(39))}\')"
+    if campaign_id and campaign_id != "All Campaigns":
+        where += f" AND campaign_id = {campaign_id}"
+    df = run_query(f"""
+        SELECT DISTINCT dma, SUM(ott_total_impressions) as ott_imp
+        FROM {VIEW} WHERE {where}
+        GROUP BY dma ORDER BY ott_imp DESC
+    """)
+    return df["dma"].tolist()
+
+available_dmas = get_dmas(selected_brand, selected_campaign)
+dma_choice = st.radio("DMA scope", ["Full DMA Breakout (all DMAs)", "Select Specific DMAs"], horizontal=True)
+
+selected_dmas = available_dmas
+if dma_choice == "Select Specific DMAs":
+    selected_dmas = st.multiselect(
+        f"Choose DMAs ({len(available_dmas)} available)",
+        available_dmas,
+        default=available_dmas[:5] if len(available_dmas) > 5 else available_dmas,
+    )
+    if not selected_dmas:
+        st.warning("Select at least one DMA.")
+        st.stop()
+    dma_list = ", ".join(f"\'{d.replace(chr(39), chr(39)+chr(39))}\'" for d in selected_dmas)
+    where_clauses.append(f"dma IN ({dma_list})")
+
+# ---- Step 4: Date Range ----
+st.markdown("---")
+st.subheader("4. Date Range")
+date_choice = st.radio("Analysis period", ["Full Campaign (all available data)", "Custom Date Range"], horizontal=True)
+
+if date_choice == "Custom Date Range":
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Start Date")
+    with col2:
+        end_date = st.date_input("End Date")
+    where_clauses.append(f"report_date >= \'{start_date}\'")
+    where_clauses.append(f"report_date <= \'{end_date}\'")
+
+# ---- Generate Report ----
+st.markdown("---")
+where_sql = " AND ".join(where_clauses)
+
+if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=True):
+    with st.spinner("Querying data..."):
+        # Main metrics query
+        metrics_df = run_query(f"""
+            SELECT
+                SUM(ott_incremental_impressions) AS ott_only_impressions,
+                CAST(SUM(ott_overlap_with_linear_overlap) AS BIGINT) AS ott_tv_impressions,
+                CAST(SUM(linear_only_impressions) AS BIGINT) AS tv_only_impressions,
+                SUM(ott_total_impressions) AS ott_total_impressions,
+                CAST(SUM(linear_total_impressions) AS BIGINT) AS linear_total_impressions,
+                SUM(total_impressions) AS total_impressions,
+                SUM(ott_incremental_viewers) AS ott_incremental_viewers,
+                SUM(ott_total_viewers) AS ott_total_viewers,
+                CAST(SUM(overlap_viewers) AS BIGINT) AS overlap_viewers,
+                SUM(all_viewers) AS all_viewers,
+                ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct,
+                ROUND(SUM(ott_total_impressions) * 1.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS ott_avg_frequency,
+                ROUND(SUM(linear_total_impressions) * 1.0 / NULLIF(SUM(linear_viewers), 0), 1) AS linear_avg_frequency
+            FROM {VIEW}
+            WHERE {where_sql}
+        """)
+
+        # DMA breakdown
+        dma_df = run_query(f"""
+            SELECT dma,
+                SUM(ott_total_impressions) AS ott_impressions,
+                SUM(ott_total_viewers) AS ott_viewers,
+                SUM(ott_incremental_viewers) AS incremental_viewers,
+                ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
+            FROM {VIEW}
+            WHERE {where_sql}
+            GROUP BY dma
+            ORDER BY ott_impressions DESC
+        """)
+
+    if metrics_df.empty or metrics_df.iloc[0]["ott_total_impressions"] is None:
+        st.error("No data found for the selected filters.")
+        st.stop()
+
+    m = metrics_df.iloc[0]
+    pct = float(m["incrementality_pct"] or 0)
+
+    # ---- RENDER DASHBOARD ----
+    st.markdown(f"### {selected_brand} — Campaign Performance Report")
+
+    # Incrementality Banner
+    st.markdown(
+        f'<div style="background:{COLORS["lime"]}; border-radius:8px; padding:20px 28px; margin:12px 0;">'
+        f'<span style="color:{COLORS["navy"]}; font-size:20px; font-weight:700;">'
+        f'{pct:.0f}% of your streaming campaign reached consumers not reached with linear TV ads.'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # KPI Cards + Donut
+    col_donut, col_kpis = st.columns([1, 3])
+    with col_donut:
+        fig = go.Figure(go.Pie(
+            values=[pct, 100 - pct], hole=0.7,
+            marker_colors=[COLORS["navy"], COLORS["mid_gray"]],
+            textinfo="none", hoverinfo="skip", sort=False))
+        fig.add_annotation(text=f"<b>{pct:.0f}%</b>", x=0.5, y=0.5,
+            font_size=28, font_color=COLORS["navy"], showarrow=False)
+        fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
+            height=200, width=200, paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=False)
+
+    with col_kpis:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Incrementality", f"{pct:.1f}%")
+        k2.metric("OTT Viewers", format_number(m["ott_total_viewers"]))
+        k3.metric("OTT Incremental", format_number(m["ott_incremental_viewers"]))
+        k4.metric("All Viewers", format_number(m["all_viewers"]))
+
+    # Media Buying Pie
+    st.markdown("#### Media Buying Breakdown")
+    ott_only = float(m["ott_only_impressions"] or 0)
+    ott_tv = float(m["ott_tv_impressions"] or 0)
+    tv_only = float(m["tv_only_impressions"] or 0)
+    total = ott_only + ott_tv + tv_only
+
+    col_pie, col_metrics = st.columns([1, 2])
+    with col_pie:
+        fig = go.Figure(go.Pie(
+            labels=["OTT Only", "OTT + TV", "TV Only"],
+            values=[ott_only, ott_tv, tv_only],
+            marker_colors=[COLORS["navy"], COLORS["cyan"], COLORS["light_cyan"]],
+            textinfo="label+percent", textfont_size=12))
+        fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10), height=280,
+            paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+    with col_metrics:
+        st.metric("OTT Only Impressions", format_number(ott_only), f"{ott_only/total*100:.1f}% of total" if total else "")
+        st.metric("OTT + TV Impressions", format_number(ott_tv), f"{ott_tv/total*100:.1f}% of total" if total else "")
+        st.metric("TV Only Impressions", format_number(tv_only), f"{tv_only/total*100:.1f}% of total" if total else "")
+
+    # Frequency Comparison
+    st.markdown("#### Average Frequency")
+    ott_freq = float(m["ott_avg_frequency"] or 0)
+    lin_freq = float(m["linear_avg_frequency"] or 0)
+    col_freq, col_vals = st.columns([2, 1])
+    with col_freq:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=["Locality OTT"], y=[ott_freq], marker_color=COLORS["navy"],
+            text=[f"{ott_freq:.1f}"], textposition="outside", showlegend=False))
+        fig.add_trace(go.Bar(x=["TV Market"], y=[lin_freq], marker_color=COLORS["light_cyan"],
+            text=[f"{lin_freq:.1f}"], textposition="outside", showlegend=False))
+        fig.update_layout(yaxis=dict(range=[0, max(ott_freq, lin_freq) * 1.4]),
+            margin=dict(t=20, b=30, l=40, r=20), height=250,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
+        st.plotly_chart(fig, use_container_width=True)
+    with col_vals:
+        st.metric("OTT Frequency", f"{ott_freq:.1f}")
+        st.metric("Linear Frequency", f"{lin_freq:.1f}")
+
+    # DMA Breakout
+    st.markdown("#### DMA Breakout")
+    if not dma_df.empty:
+        fig = go.Figure(go.Bar(
+            y=dma_df["dma"].head(20), x=dma_df["ott_impressions"].head(20), orientation="h",
+            marker_color=COLORS["cyan"],
+            text=dma_df["ott_impressions"].head(20).apply(format_number),
+            textposition="outside"))
+        fig.update_layout(
+            yaxis=dict(autorange="reversed"),
+            margin=dict(t=20, b=30, l=180, r=80),
+            height=max(300, len(dma_df.head(20)) * 30),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander(f"Full DMA Data ({len(dma_df)} DMAs)"):
+            st.dataframe(dma_df, use_container_width=True)
