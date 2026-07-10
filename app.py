@@ -188,6 +188,8 @@ def get_campaigns(brand):
                 MAX(m.locality_advertiser),
                 CONCAT('Campaign ', v.campaign_id)
             ) AS campaign_name,
+            MIN(m.locality_campaign_start_date) AS start_date,
+            MAX(m.locality_campaign_end_date) AS end_date,
             SUM(v.ott_total_impressions) AS ott_imp
         FROM {VIEW} v
         LEFT JOIN {MAPPING} m
@@ -200,7 +202,9 @@ def get_campaigns(brand):
 
 campaigns_df = get_campaigns(selected_brand)
 campaign_labels = ["All Campaigns"] + [
-    f"{row['campaign_name']} (ID: {row['campaign_id']})"
+    f"{row['campaign_name']} ({row['start_date']} to {row['end_date']})".rstrip(" (None to None)")
+    if row.get('start_date') and row.get('end_date')
+    else f"{row['campaign_name']} (ID: {row['campaign_id']})"
     for _, row in campaigns_df.iterrows()
 ]
 selected_campaign_label = st.selectbox("Campaign", campaign_labels)
