@@ -374,15 +374,15 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         """)
 
         dma_df = run_query(f"""
-            SELECT dma,
+            SELECT dma, dma_id,
                 SUM(ott_total_impressions) AS ott_impressions,
                 SUM(ott_total_viewers) AS ott_viewers,
                 SUM(ott_incremental_viewers) AS incremental_viewers,
                 ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS incrementality_pct
             FROM {VIEW}
             WHERE {where_sql}
-            GROUP BY dma
-            ORDER BY ott_impressions DESC
+            GROUP BY dma, dma_id
+            ORDER BY incrementality_pct DESC
         """)
 
     if metrics_df.empty or metrics_df.iloc[0]["ott_total_impressions"] is None:
@@ -483,24 +483,97 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     # DMA Breakout
     st.markdown("#### DMA Breakout")
     if not dma_df.empty:
-        display_dma = dma_df.head(20)
-        # Bar labels: impressions + incrementality %
+        # Sort by incrementality %
+        display_dma = dma_df.sort_values("incrementality_pct", ascending=False).head(20)
+
+        # Color gradient: navy (high incrementality) → light_cyan (low)
+        pct_vals = display_dma["incrementality_pct"].fillna(0)
+        pct_min, pct_max = pct_vals.min(), pct_vals.max()
+        if pct_max == pct_min:
+            bar_colors = [COLORS["cyan"]] * len(display_dma)
+        else:
+            import plotly.colors as pc
+            colorscale = [[0, COLORS["light_cyan"]], [0.5, COLORS["cyan"]], [1.0, COLORS["navy"]]]
+            normalized = (pct_vals - pct_min) / (pct_max - pct_min)
+            bar_colors = [
+                pc.sample_colorscale(colorscale, [v])[0] for v in normalized
+            ]
+
+        # Bar labels: incrementality % + impressions
         bar_labels = display_dma.apply(
-            lambda r: f"{format_number(r['ott_impressions'])}  |  {r['incrementality_pct']:.0f}% incr."
+            lambda r: f"{r['incrementality_pct']:.0f}%  |  {format_number(r['ott_impressions'])} imp"
             if pd.notna(r.get('incrementality_pct')) else format_number(r['ott_impressions']),
             axis=1
         )
+
         fig = go.Figure(go.Bar(
-            y=display_dma["dma"], x=display_dma["ott_impressions"], orientation="h",
-            marker_color=COLORS["cyan"],
+            y=display_dma["dma"], x=display_dma["incrementality_pct"], orientation="h",
+            marker_color=bar_colors,
             text=bar_labels,
             textposition="outside"))
         fig.update_layout(
+            title="Top DMAs by Incrementality %",
+            xaxis=dict(title="Incrementality %", range=[0, min(pct_max * 1.3, 105)]),
             yaxis=dict(autorange="reversed"),
-            margin=dict(t=20, b=30, l=180, r=120),
-            height=max(300, len(display_dma) * 30),
+            margin=dict(t=40, b=30, l=180, r=140),
+            height=max(300, len(display_dma) * 32),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
         st.plotly_chart(fig, use_container_width=True)
+
+        # DMA Heatmap (choropleth) — show when multiple DMAs selected
+        if len(dma_df) > 1 and "dma_id" in dma_df.columns:
+            st.markdown("#### Geography Heatmap")
+            st.caption("Incrementality % by DMA region")
+            try:
+                import urllib.request, json as json_mod
+                DMA_GEOJSON_URL = "https://raw.githubusercontent.com/simzou/nielsen-dma/master/nielsendma.json"
+
+                @st.cache_data(ttl=3600)
+                def load_dma_geojson():
+                    with urllib.request.urlopen(DMA_GEOJSON_URL) as resp:
+                        return json_mod.loads(resp.read().decode())
+
+                geojson = load_dma_geojson()
+
+                # Map our dma_id to GeoJSON feature id field
+                # The GeoJSON uses "dma" as the property with the DMA code
+                map_df = dma_df[["dma", "dma_id", "incrementality_pct", "ott_impressions"]].copy()
+                map_df["dma_id"] = map_df["dma_id"].astype(str)
+
+                fig_map = go.Figure(go.Choropleth(
+                    geojson=geojson,
+                    locations=map_df["dma_id"],
+                    z=map_df["incrementality_pct"],
+                    featureidkey="properties.dma",
+                    colorscale=[
+                        [0, COLORS["light_cyan"]],
+                        [0.4, COLORS["lime"]],
+                        [0.7, COLORS["cyan"]],
+                        [1.0, COLORS["navy"]],
+                    ],
+                    colorbar=dict(title="Incr. %", thickness=15),
+                    hovertext=map_df.apply(
+                        lambda r: f"{r['dma']}<br>Incrementality: {r['incrementality_pct']:.0f}%<br>Impressions: {format_number(r['ott_impressions'])}",
+                        axis=1
+                    ),
+                    hoverinfo="text",
+                    marker_line_color=COLORS["cyan"],
+                    marker_line_width=0.5,
+                ))
+                fig_map.update_geos(
+                    scope="usa",
+                    showlakes=False,
+                    bgcolor="rgba(0,0,0,0)",
+                )
+                fig_map.update_layout(
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    height=450,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    geo=dict(bgcolor="rgba(0,0,0,0)"),
+                )
+                st.plotly_chart(fig_map, use_container_width=True)
+            except Exception as map_err:
+                st.caption(f"Map unavailable: {map_err}")
 
         with st.expander(f"Full DMA Data ({len(dma_df)} DMAs)"):
             st.dataframe(dma_df, use_container_width=True)
