@@ -484,14 +484,20 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     st.markdown("#### DMA Breakout")
     if not dma_df.empty:
         display_dma = dma_df.head(20)
+        # Bar labels: impressions + incrementality %
+        bar_labels = display_dma.apply(
+            lambda r: f"{format_number(r['ott_impressions'])}  |  {r['incrementality_pct']:.0f}% incr."
+            if pd.notna(r.get('incrementality_pct')) else format_number(r['ott_impressions']),
+            axis=1
+        )
         fig = go.Figure(go.Bar(
             y=display_dma["dma"], x=display_dma["ott_impressions"], orientation="h",
             marker_color=COLORS["cyan"],
-            text=display_dma["ott_impressions"].apply(format_number),
+            text=bar_labels,
             textposition="outside"))
         fig.update_layout(
             yaxis=dict(autorange="reversed"),
-            margin=dict(t=20, b=30, l=180, r=80),
+            margin=dict(t=20, b=30, l=180, r=120),
             height=max(300, len(display_dma) * 30),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
         st.plotly_chart(fig, use_container_width=True)
