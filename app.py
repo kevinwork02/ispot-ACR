@@ -201,9 +201,20 @@ def get_campaigns(brand):
     return df
 
 campaigns_df = get_campaigns(selected_brand)
+def _fmt_date(d):
+    """Convert ISO date string to MM/DD/YY format."""
+    if not d or d == 'None':
+        return None
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(str(d)[:10], "%Y-%m-%d")
+        return dt.strftime("%m/%d/%y")
+    except (ValueError, TypeError):
+        return str(d)
+
 campaign_labels = ["All Campaigns"] + [
-    f"{row['campaign_name']} ({row['start_date']} to {row['end_date']})".rstrip(" (None to None)")
-    if row.get('start_date') and row.get('end_date')
+    f"{row['campaign_name']} ({_fmt_date(row['start_date'])} - {_fmt_date(row['end_date'])})"
+    if row.get('start_date') and row.get('end_date') and str(row['start_date']) != 'None'
     else f"{row['campaign_name']} (ID: {row['campaign_id']})"
     for _, row in campaigns_df.iterrows()
 ]
@@ -560,7 +571,9 @@ RULES:
 - SQL must query: {VIEW} and include WHERE {ctx['where_sql']} as a base filter.
 - For mapping fields (advertiser, agency, placement), LEFT JOIN {MAPPING} ON campaign_id = CAST(fw_campaign_id AS BIGINT)
 - ALWAYS use LOWER(col) LIKE '%term%' for text filters. Never use =.
-- Be concise and data-driven. Use actual numbers, not vague language."""
+- Be concise and data-driven. Use actual numbers, not vague language.
+- ALWAYS show incremental reach / incrementality as a PERCENTAGE (incremental_viewers / total_viewers * 100). Never show raw viewer counts alone for incrementality — always compute and display the percentage like the dashboard banner does.
+- When showing incrementality per DMA, format as: "DMA Name: XX.X%" (percentage first, raw counts optional in parentheses)."""
 
                 messages = [{"role": "system", "content": chat_system}]
                 messages += [{"role": m["role"], "content": m["content"]} for m in st.session_state["chat_history"]]
