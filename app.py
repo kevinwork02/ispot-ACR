@@ -64,7 +64,7 @@ def format_number(n):
     return f"{n:,.0f}"
 
 
-def generate_insights(brand, campaign_label, metrics, dma_df, dma_count):
+def generate_insights(brand, campaign_label, metrics, dma_df, dma_count, placement_info=None):
     """Use LLM to generate an executive summary of campaign performance."""
     m = metrics
     pct = float(m.get("incrementality_pct", 0) or 0)
@@ -85,12 +85,20 @@ def generate_insights(brand, campaign_label, metrics, dma_df, dma_count):
         top_dmas = ", ".join(f"{r['dma']} ({r['incrementality_pct']:.0f}%)" for _, r in top_3.iterrows())
         bottom_dmas = ", ".join(f"{r['dma']} ({r['incrementality_pct']:.0f}%)" for _, r in bot_3.iterrows())
 
+    placement_context = ""
+    if placement_info:
+        placement_context = f"""
+Placement: {placement_info.get('locality_placement_name', 'N/A')}
+Agency: {placement_info.get('locality_agency', 'N/A')}
+Product: {placement_info.get('locality_product', 'N/A')}
+Flight: {placement_info.get('locality_placement_start_date', '?')} to {placement_info.get('locality_placement_end_date', '?')}"""
+
     prompt = f"""You are an advertising analytics expert at Locality, a streaming/OTT advertising company.
 Write a concise 3-4 sentence executive summary for this campaign performance report.
 Be specific with numbers. Highlight what's notable (good or concerning).
 
 Brand: {brand}
-Campaign: {campaign_label}
+Campaign: {campaign_label}{placement_context}
 DMAs Analyzed: {dma_count}
 
 KEY METRICS:
@@ -207,10 +215,71 @@ if selected_campaign_id is not None:
 
 
 # ==============================================================
-# STEP 3: DMA SELECTION
+# STEP 3: PLACEMENT DRILL-DOWN (Optional)
 # ==============================================================
 st.markdown("---")
-st.subheader("3. DMA Breakout")
+st.subheader("3. Placement (optional)")
+
+selected_placement_info = None
+
+@st.cache_data(ttl=300)
+def get_placements(brand, campaign_id=None):
+    """Get placements from the mapping table for selected brand/campaign."""
+    brand_esc = brand.replace("'", "''")
+    if campaign_id:
+        where = f"CAST(m.locality_campaign_id AS BIGINT) = {campaign_id}"
+    else:
+        where = f"LOWER(m.locality_advertiser) LIKE LOWER('%{brand_esc}%')"
+    df = run_query(f"""
+        SELECT DISTINCT
+            m.locality_placement_id,
+            m.locality_placement_name,
+            m.locality_campaign,
+            m.locality_advertiser,
+            m.locality_agency,
+            m.advertiser_category,
+            m.locality_product,
+            m.locality_placement_start_date,
+            m.locality_placement_end_date
+        FROM {MAPPING} m
+        WHERE {where}
+            AND m.locality_placement_name IS NOT NULL
+        ORDER BY m.locality_placement_name ASC
+    """)
+    return df
+
+placements_df = get_placements(selected_brand, selected_campaign_id)
+
+if placements_df.empty:
+    st.caption("No placements found in mapping table for this selection.")
+    selected_placement_label = "All Placements"
+else:
+    placement_labels = ["All Placements"] + [
+        f"{row['locality_placement_name']} (ID: {row['locality_placement_id']})"
+        for _, row in placements_df.iterrows()
+    ]
+    selected_placement_label = st.selectbox("Placement", placement_labels)
+
+    if selected_placement_label != "All Placements":
+        idx = placement_labels.index(selected_placement_label) - 1
+        selected_placement_info = placements_df.iloc[idx].to_dict()
+
+        # Show placement metadata
+        with st.expander("Placement Details", expanded=True):
+            pcol1, pcol2, pcol3 = st.columns(3)
+            pcol1.markdown(f"**Agency:** {selected_placement_info.get('locality_agency') or '\u2014'}")
+            pcol2.markdown(f"**Product:** {selected_placement_info.get('locality_product') or '\u2014'}")
+            pcol3.markdown(f"**Category:** {selected_placement_info.get('advertiser_category') or '\u2014'}")
+            pcol1.markdown(f"**Start:** {selected_placement_info.get('locality_placement_start_date') or '\u2014'}")
+            pcol2.markdown(f"**End:** {selected_placement_info.get('locality_placement_end_date') or '\u2014'}")
+            pcol3.markdown(f"**Advertiser:** {selected_placement_info.get('locality_advertiser') or '\u2014'}")
+
+
+# ==============================================================
+# STEP 4: DMA SELECTION
+# ==============================================================
+st.markdown("---")
+st.subheader("4. DMA Breakout")
 
 @st.cache_data(ttl=300)
 def get_dmas(brand, campaign_id=None):
@@ -243,10 +312,10 @@ if dma_choice == "Select Specific DMAs":
 
 
 # ==============================================================
-# STEP 4: DATE RANGE
+# STEP 5: DATE RANGE
 # ==============================================================
 st.markdown("---")
-st.subheader("4. Date Range")
+st.subheader("5. Date Range")
 date_choice = st.radio("Analysis period", ["Full Campaign (all available data)", "Custom Date Range"], horizontal=True)
 
 if date_choice == "Custom Date Range":
@@ -309,6 +378,7 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     st.session_state["report_context"] = {
         "brand": selected_brand,
         "campaign": selected_campaign_label if selected_campaign_label != "All Campaigns" else "All Campaigns",
+        "placement": selected_placement_info,
         "dma_count": len(selected_dmas),
         "where_sql": where_sql,
         "metrics": m.to_dict(),
@@ -317,7 +387,10 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
 
     # ---- RENDER DASHBOARD ----
     campaign_display = st.session_state["report_context"]["campaign"]
-    st.markdown(f"### {selected_brand} \u2014 {campaign_display}")
+    placement_display = ""
+    if selected_placement_info:
+        placement_display = f" \u2014 {selected_placement_info.get('locality_placement_name', '')}"
+    st.markdown(f"### {selected_brand} \u2014 {campaign_display}{placement_display}")
 
     # Incrementality Banner
     st.markdown(
@@ -418,6 +491,7 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             metrics=m.to_dict(),
             dma_df=dma_df,
             dma_count=len(selected_dmas),
+            placement_info=selected_placement_info,
         )
     st.markdown(
         f'<div style="background:{COLORS["light_gray"]}; border-left:4px solid {COLORS["cyan"]}; '
@@ -454,12 +528,16 @@ if "report_context" in st.session_state:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # Build context-aware system prompt for follow-ups
                 dma_preview = pd.DataFrame(ctx["dma_data"]).head(10).to_string(index=False) if ctx["dma_data"] else "No DMA data"
+                placement_ctx = ""
+                if ctx.get("placement"):
+                    p = ctx["placement"]
+                    placement_ctx = f"\nPlacement: {p.get('locality_placement_name', 'N/A')} | Agency: {p.get('locality_agency', 'N/A')} | Product: {p.get('locality_product', 'N/A')}"
+
                 chat_system = f"""You are an advertising analytics expert at Locality.
 The user is viewing a campaign performance report with these filters:
 - Brand: {ctx['brand']}
-- Campaign: {ctx['campaign']}
+- Campaign: {ctx['campaign']}{placement_ctx}
 - DMAs: {ctx['dma_count']} markets
 - SQL filter applied: WHERE {ctx['where_sql']}
 
