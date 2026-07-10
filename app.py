@@ -184,11 +184,14 @@ def get_campaigns(brand):
     df = run_query(f"""
         SELECT
             v.campaign_id,
-            COALESCE(MAX(m.locality_campaign), CONCAT('Campaign ', v.campaign_id)) AS campaign_name,
+            COALESCE(
+                MAX(m.locality_advertiser),
+                CONCAT('Campaign ', v.campaign_id)
+            ) AS campaign_name,
             SUM(v.ott_total_impressions) AS ott_imp
         FROM {VIEW} v
         LEFT JOIN {MAPPING} m
-            ON v.campaign_id = CAST(m.locality_campaign_id AS BIGINT)
+            ON v.campaign_id = CAST(m.fw_campaign_id AS BIGINT)
         WHERE LOWER(v.brand) = LOWER('{brand_esc}')
         GROUP BY v.campaign_id
         ORDER BY ott_imp DESC
@@ -227,7 +230,7 @@ def get_placements(brand, campaign_id=None):
     """Get placements from the mapping table for selected brand/campaign."""
     brand_esc = brand.replace("'", "''")
     if campaign_id:
-        where = f"CAST(m.locality_campaign_id AS BIGINT) = {campaign_id}"
+        where = f"CAST(m.fw_campaign_id AS BIGINT) = {campaign_id}"
     else:
         where = f"LOWER(m.locality_advertiser) LIKE LOWER('%{brand_esc}%')"
     df = run_query(f"""
@@ -551,7 +554,7 @@ RULES:
 - If you can answer from the data above, answer directly with specific numbers.
 - If you need additional data, output a single SQL query wrapped in ```sql ... ``` fences.
 - SQL must query: {VIEW} and include WHERE {ctx['where_sql']} as a base filter.
-- For mapping fields (advertiser, agency, placement), LEFT JOIN {MAPPING} ON campaign_id = CAST(locality_campaign_id AS BIGINT)
+- For mapping fields (advertiser, agency, placement), LEFT JOIN {MAPPING} ON campaign_id = CAST(fw_campaign_id AS BIGINT)
 - ALWAYS use LOWER(col) LIKE '%term%' for text filters. Never use =.
 - Be concise and data-driven. Use actual numbers, not vague language."""
 
