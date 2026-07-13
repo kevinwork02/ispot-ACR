@@ -8,7 +8,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-st.set_page_config(page_title="iSpot Impression Analysis", page_icon="\U0001f4fa", layout="wide")
+st.set_page_config(page_title="iSpot Reach & Frequency Analysis", page_icon="\U0001f4fa", layout="wide")
 
 # ---- Config ----
 def get_secret(key, default=""):
@@ -148,7 +148,7 @@ if not all([db_host, db_token, db_warehouse]):
 # ==============================================================
 # STEP 1: BRAND SELECTION (Required)
 # ==============================================================
-st.title("\U0001f4fa iSpot Impression Analysis")
+st.title("\U0001f4fa iSpot Reach & Frequency Analysis")
 st.caption("Select filters to generate your campaign performance report.")
 
 st.markdown("---")
