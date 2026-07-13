@@ -20,7 +20,7 @@ def get_secret(key, default=""):
 db_host = get_secret("DATABRICKS_HOST")
 db_token = get_secret("DATABRICKS_TOKEN")
 db_warehouse = get_secret("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH")
-llm_model = get_secret("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
+llm_model = get_secret("LLM_MODEL", "databricks-claude-sonnet-4")
 
 COLORS = {
     "navy": "#1B2A4A", "cyan": "#00BCD4", "light_cyan": "#80DEEA",
@@ -1045,11 +1045,34 @@ RULES:
                             extra_df = run_query(extra_sql)
                             if not extra_df.empty:
                                 st.dataframe(extra_df, use_container_width=True)
-                            answer = re.sub(r'```sql\s*.+?```', '', answer, flags=re.DOTALL).strip()
+                                # Ask LLM to explain the results in natural language
+                                explain_prompt = (
+                                    f"The user asked: '{follow_up}'\n\n"
+                                    f"Here are the SQL results:\n{extra_df.to_string(index=False)}\n\n"
+                                    f"Provide a concise natural language explanation of what this data shows. "
+                                    f"Explain WHY the numbers are what they are (e.g. 100% incrementality means no linear TV was running). "
+                                    f"Lead with the key insight. 2-3 sentences max."
+                                )
+                                try:
+                                    explain_resp = client.chat.completions.create(
+                                        model=llm_model,
+                                        messages=[{"role": "system", "content": "You are an advertising analytics expert. Explain data insights clearly and concisely."}, {"role": "user", "content": explain_prompt}],
+                                        max_tokens=300, temperature=0.2,
+                                    )
+                                    explanation = explain_resp.choices[0].message.content.strip()
+                                    answer = explanation
+                                except Exception:
+                                    answer = re.sub(r'```sql\s*.+?```', '', answer, flags=re.DOTALL).strip()
+                            else:
+                                answer = re.sub(r'```sql\s*.+?```', '', answer, flags=re.DOTALL).strip()
+                                answer += "\n\n_No data returned for this query._"
                         except Exception as sql_err:
                             answer += f"\n\n_SQL execution failed: {sql_err}_"
-
-                    st.markdown(answer)
+                    
+                    # Remove any leftover SQL fences from the displayed answer
+                    answer = re.sub(r'```sql\s*.+?```', '', answer, flags=re.DOTALL).strip()
+                    if answer:
+                        st.markdown(answer)
                     st.session_state["chat_history"].append({"role": "assistant", "content": answer})
 
                 except Exception as e:
