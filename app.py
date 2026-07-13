@@ -876,100 +876,84 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     st.markdown("---")
     st.markdown("#### \U0001f4e4 Export Report")
 
-    def build_report_excel():
-        """Generate a multi-sheet Excel report with all dashboard data."""
+    def build_report_csv():
+        """Generate a comprehensive CSV report with all dashboard data."""
         import io
-        output = io.BytesIO()
+        lines = []
 
-        # Helper to safely extract metric values (avoid Decimal/None serialization issues)
-        def _safe(val, fmt=""):
+        # Helper to safely format values
+        def _s(val):
             if val is None:
-                return 0
+                return ""
             try:
-                v = float(val)
-                return f"{v:{fmt}}" if fmt else v
+                return str(float(val)) if hasattr(val, "as_tuple") else str(val)
             except (TypeError, ValueError):
                 return str(val)
 
         row = m.iloc[0]
 
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            # Sheet 1: Summary metrics
-            summary_data = {
-                "Metric": [
-                    "Brand", "Campaign", "DMAs Analyzed",
-                    "Incrementality %", "OTT Total Impressions", "OTT Total Viewers",
-                    "OTT Incremental Viewers", "All Viewers",
-                    "OTT Only Impressions", "OTT + TV Impressions", "TV Only Impressions",
-                    "OTT Avg Frequency", "Linear Avg Frequency",
-                ],
-                "Value": [
-                    str(selected_brand),
-                    str(campaign_display),
-                    int(len(selected_dmas)),
-                    _safe(row.get("incrementality_pct", 0), ".1f") + "%",
-                    _safe(row.get("ott_total_impressions", 0)),
-                    _safe(row.get("ott_total_viewers", 0)),
-                    _safe(row.get("ott_incremental_viewers", 0)),
-                    _safe(row.get("all_viewers", 0)),
-                    _safe(row.get("ott_only_impressions", 0)),
-                    _safe(row.get("ott_tv_impressions", 0)),
-                    _safe(row.get("tv_only_impressions", 0)),
-                    _safe(row.get("ott_avg_frequency", 0), ".1f"),
-                    _safe(row.get("linear_avg_frequency", 0), ".1f"),
-                ],
-            }
-            pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
+        # Section 1: Summary
+        lines.append("=== SUMMARY ===")
+        lines.append(f"Brand,{selected_brand}")
+        lines.append(f"Campaign,{campaign_display}")
+        lines.append(f"DMAs Analyzed,{len(selected_dmas)}")
+        lines.append(f"Incrementality %,{_s(row.get('incrementality_pct', 0))}")
+        lines.append(f"OTT Total Impressions,{_s(row.get('ott_total_impressions', 0))}")
+        lines.append(f"OTT Total Viewers,{_s(row.get('ott_total_viewers', 0))}")
+        lines.append(f"OTT Incremental Viewers,{_s(row.get('ott_incremental_viewers', 0))}")
+        lines.append(f"All Viewers,{_s(row.get('all_viewers', 0))}")
+        lines.append(f"OTT Only Impressions,{_s(row.get('ott_only_impressions', 0))}")
+        lines.append(f"OTT + TV Impressions,{_s(row.get('ott_tv_impressions', 0))}")
+        lines.append(f"TV Only Impressions,{_s(row.get('tv_only_impressions', 0))}")
+        lines.append(f"OTT Avg Frequency,{_s(row.get('ott_avg_frequency', 0))}")
+        lines.append(f"Linear Avg Frequency,{_s(row.get('linear_avg_frequency', 0))}")
+        lines.append("")
 
-            # Sheet 2: DMA Breakout (convert Decimals to float)
-            if not dma_df.empty:
-                export_dma = dma_df.copy()
-                for col in export_dma.select_dtypes(include=["object"]).columns:
-                    export_dma[col] = export_dma[col].apply(
-                        lambda x: float(x) if hasattr(x, "as_tuple") else x
-                    )
-                export_dma.to_excel(writer, sheet_name="DMA Breakout", index=False)
+        # Section 2: Placement (if selected)
+        if selected_placement_info:
+            pl = selected_placement_info
+            lines.append("=== PLACEMENT ===")
+            lines.append(f"Placement,{pl.get('locality_placement_name', '')}")
+            lines.append(f"Advertiser,{pl.get('locality_advertiser', '')}")
+            lines.append(f"Agency,{pl.get('locality_agency', '')}")
+            lines.append(f"Product,{pl.get('locality_product', '')}")
+            lines.append(f"Category,{pl.get('advertiser_category', '')}")
+            lines.append(f"Start Date,{pl.get('locality_placement_start_date', '')}")
+            lines.append(f"End Date,{pl.get('locality_placement_end_date', '')}")
+            lines.append("")
 
-            # Sheet 3: Placement info (if selected)
-            if selected_placement_info:
-                pl = selected_placement_info
-                pl_data = {
-                    "Field": ["Placement", "Advertiser", "Agency", "Product", "Category",
-                              "Start Date", "End Date"],
-                    "Value": [
-                        str(pl.get("locality_placement_name", "")),
-                        str(pl.get("locality_advertiser", "")),
-                        str(pl.get("locality_agency", "")),
-                        str(pl.get("locality_product", "")),
-                        str(pl.get("advertiser_category", "")),
-                        str(pl.get("locality_placement_start_date", "")),
-                        str(pl.get("locality_placement_end_date", "")),
-                    ],
-                }
-                pd.DataFrame(pl_data).to_excel(writer, sheet_name="Placement", index=False)
+        # Section 3: Executive Insights
+        lines.append("=== EXECUTIVE INSIGHTS ===")
+        lines.append(str(insights).replace(",", ";"))
+        lines.append("")
 
-            # Sheet 4: Executive Insights
-            pd.DataFrame({"Insights": [str(insights)]}).to_excel(
-                writer, sheet_name="Executive Insights", index=False
-            )
+        # Section 4: DMA Breakout
+        if not dma_df.empty:
+            lines.append("=== DMA BREAKOUT ===")
+            # Convert all values to safe strings and write as CSV
+            export_dma = dma_df.copy()
+            for col in export_dma.columns:
+                export_dma[col] = export_dma[col].apply(_s)
+            csv_buf = io.StringIO()
+            export_dma.to_csv(csv_buf, index=False)
+            lines.append(csv_buf.getvalue())
 
-        output.seek(0)
-        return output.getvalue()
+        return "\n".join(lines).encode("utf-8")
 
     export_col1, export_col2 = st.columns([1, 3])
     with export_col1:
-        report_bytes = build_report_excel()
-        fname = f"{selected_brand.replace(' ', '_')}_{campaign_display[:20].replace(' ', '_')}_report.xlsx"
+        report_bytes = build_report_csv()
+        fname = f"{selected_brand.replace(' ', '_')}_{campaign_display[:20].replace(' ', '_')}_report.csv"
         st.download_button(
-            label="\U0001f4ca Export Full Report (Excel)",
+            label="\U0001f4ca Export Full Report",
             data=report_bytes,
             file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="text/csv",
         )
     with export_col2:
         st.caption(
-            "Exports an Excel workbook with 4 sheets: Summary Metrics, DMA Breakout, "
-            "Placement Details, and Executive Insights."
+            "Exports a CSV report with: Summary Metrics, Placement Details, "
+            "Executive Insights, and full DMA Breakout data."
         )
 
 
