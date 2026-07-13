@@ -777,6 +777,13 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
 
         with st.expander(f"Full DMA Data ({len(dma_df)} DMAs)"):
             st.dataframe(dma_df, use_container_width=True)
+            csv_data = dma_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="\u2B07 Download DMA Data (CSV)",
+                data=csv_data,
+                file_name=f"{selected_brand.replace(' ', '_')}_dma_data.csv",
+                mime="text/csv",
+            )
 
     # ---- LLM INSIGHTS NARRATIVE ----
     st.markdown("---")
