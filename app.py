@@ -1002,12 +1002,26 @@ Current metrics (already computed):
 DMA breakdown (top rows):
 {dma_preview}
 
+AVAILABLE COLUMNS in {VIEW} (locality_dev.silver.ispot_dma_reports_latest):
+- brand, brand_id, campaign_id, dma, dma_id, report_date
+- ott_total_impressions, ott_incremental_impressions, ott_overlap_with_linear_overlap
+- linear_total_impressions, linear_only_impressions
+- total_impressions
+- ott_total_viewers, ott_incremental_viewers, overlap_viewers, linear_viewers, all_viewers
+- There is NO 'impression_type' column. The data is ALREADY split into ott_* and linear_* columns.
+- To get linear impressions: use linear_total_impressions or linear_only_impressions
+- To get OTT impressions: use ott_total_impressions or ott_incremental_impressions
+- Incrementality = ROUND(SUM(ott_incremental_viewers) * 100.0 / NULLIF(SUM(ott_total_viewers), 0), 1)
+- OTT Frequency = ROUND(SUM(ott_total_impressions) * 1.0 / NULLIF(SUM(ott_total_viewers), 0), 1)
+- Linear Frequency = ROUND(SUM(linear_total_impressions) * 1.0 / NULLIF(CAST(SUM(linear_viewers) AS BIGINT), 0), 1)
+
 RULES:
 - If you can answer from the data above, answer directly with specific numbers.
 - If you need additional data, output a single SQL query wrapped in ```sql ... ``` fences.
 - SQL must query: {VIEW} and include WHERE {ctx['where_sql']} as a base filter.
 - For mapping fields (advertiser, agency, placement), LEFT JOIN {MAPPING} ON campaign_id = CAST(fw_campaign_id AS BIGINT)
 - ALWAYS use LOWER(col) LIKE '%term%' for text filters. Never use =.
+- NEVER invent columns. Only use the columns listed above.
 - Be concise and data-driven. Use actual numbers, not vague language.
 - ALWAYS show incremental reach / incrementality as a PERCENTAGE (incremental_viewers / total_viewers * 100). Never show raw viewer counts alone for incrementality — always compute and display the percentage like the dashboard banner does.
 - When showing incrementality per DMA, format as: "DMA Name: XX.X%" (percentage first, raw counts optional in parentheses)."""
