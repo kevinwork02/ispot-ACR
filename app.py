@@ -610,7 +610,24 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                             axis=1
                         ),
                         hoverinfo="text",
+                        showlegend=False,
                     ))
+                    # Size reference bubbles (legend-only, invisible on map)
+                    imp_max = float(map_df["ott_impressions"].max())
+                    size_refs = [
+                        ("Small", 0.1, 8),
+                        ("Medium", 0.4, 20),
+                        ("Large", 1.0, 40),
+                    ]
+                    for label, frac, sz in size_refs:
+                        imp_val = imp_max * frac
+                        fig_map.add_trace(go.Scattergeo(
+                            lat=[None], lon=[None],
+                            marker=dict(size=sz, color=COLORS["mid_gray"], line=dict(width=1, color=COLORS["navy"])),
+                            name=f"{label} ({format_number(imp_val)} imp)",
+                            showlegend=True,
+                        ))
+
                     fig_map.update_geos(
                         scope="usa",
                         showland=True, landcolor=COLORS["light_gray"],
@@ -619,15 +636,21 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                         showsubunits=True, subunitcolor="#ddd",
                     )
                     fig_map.update_layout(
-                        margin=dict(t=30, b=50, l=10, r=10),
-                        height=470,
+                        margin=dict(t=30, b=60, l=10, r=10),
+                        height=480,
                         paper_bgcolor="rgba(0,0,0,0)",
                         geo=dict(bgcolor="rgba(0,0,0,0)"),
+                        legend=dict(
+                            title=dict(text="Impressions", font=dict(size=11, color=COLORS["navy"])),
+                            orientation="h", x=0.5, xanchor="center", y=-0.02,
+                            font=dict(size=11),
+                            itemsizing="constant",
+                        ),
                         annotations=[
                             dict(
-                                text="<b>Bubble size</b> = OTT Impressions &nbsp;&nbsp;|&nbsp;&nbsp; <b>Color</b> = Incrementality %",
-                                x=0.5, y=-0.05, xref="paper", yref="paper",
-                                showarrow=False, font=dict(size=12, color="#555"),
+                                text="<b>Color</b> = Incrementality %",
+                                x=0.5, y=-0.1, xref="paper", yref="paper",
+                                showarrow=False, font=dict(size=11, color="#555"),
                             )
                         ],
                     )
