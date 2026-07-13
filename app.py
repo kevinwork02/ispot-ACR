@@ -805,6 +805,87 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
     )
 
 
+    # ---- EXPORT FULL REPORT ----
+    st.markdown("---")
+    st.markdown("#### \U0001f4e4 Export Report")
+
+    def build_report_excel():
+        """Generate a multi-sheet Excel report with all dashboard data."""
+        import io
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            # Sheet 1: Summary metrics
+            summary_data = {
+                "Metric": [
+                    "Brand", "Campaign", "DMAs Analyzed",
+                    "Incrementality %", "OTT Total Impressions", "OTT Total Viewers",
+                    "OTT Incremental Viewers", "All Viewers",
+                    "OTT Only Impressions", "OTT + TV Impressions", "TV Only Impressions",
+                    "OTT Avg Frequency", "Linear Avg Frequency",
+                ],
+                "Value": [
+                    selected_brand, campaign_display, len(selected_dmas),
+                    f"{m.iloc[0].get('incrementality_pct', 0):.1f}%",
+                    m.iloc[0].get("ott_total_impressions", 0),
+                    m.iloc[0].get("ott_total_viewers", 0),
+                    m.iloc[0].get("ott_incremental_viewers", 0),
+                    m.iloc[0].get("all_viewers", 0),
+                    m.iloc[0].get("ott_only_impressions", 0),
+                    m.iloc[0].get("ott_tv_impressions", 0),
+                    m.iloc[0].get("tv_only_impressions", 0),
+                    m.iloc[0].get("ott_avg_frequency", 0),
+                    m.iloc[0].get("linear_avg_frequency", 0),
+                ],
+            }
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
+
+            # Sheet 2: DMA Breakout
+            if not dma_df.empty:
+                dma_df.to_excel(writer, sheet_name="DMA Breakout", index=False)
+
+            # Sheet 3: Placement info (if selected)
+            if selected_placement_info:
+                pl = selected_placement_info
+                pl_data = {
+                    "Field": ["Placement", "Advertiser", "Agency", "Product", "Category",
+                              "Start Date", "End Date"],
+                    "Value": [
+                        pl.get("locality_placement_name", ""),
+                        pl.get("locality_advertiser", ""),
+                        pl.get("locality_agency", ""),
+                        pl.get("locality_product", ""),
+                        pl.get("advertiser_category", ""),
+                        pl.get("locality_placement_start_date", ""),
+                        pl.get("locality_placement_end_date", ""),
+                    ],
+                }
+                pd.DataFrame(pl_data).to_excel(writer, sheet_name="Placement", index=False)
+
+            # Sheet 4: Executive Insights
+            pd.DataFrame({"Insights": [insights]}).to_excel(
+                writer, sheet_name="Executive Insights", index=False
+            )
+
+        output.seek(0)
+        return output.getvalue()
+
+    export_col1, export_col2 = st.columns([1, 3])
+    with export_col1:
+        report_bytes = build_report_excel()
+        fname = f"{selected_brand.replace(' ', '_')}_{campaign_display[:20].replace(' ', '_')}_report.xlsx"
+        st.download_button(
+            label="\U0001f4ca Export Full Report (Excel)",
+            data=report_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with export_col2:
+        st.caption(
+            "Exports an Excel workbook with 4 sheets: Summary Metrics, DMA Breakout, "
+            "Placement Details, and Executive Insights."
+        )
+
+
 # ==============================================================
 # FOLLOW-UP CHAT (persists after report generation)
 # ==============================================================
