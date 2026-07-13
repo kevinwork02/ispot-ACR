@@ -474,24 +474,44 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         st.metric("OTT + TV Impressions", format_number(ott_tv), f"{ott_tv/total_imp*100:.1f}% of total" if total_imp else "")
         st.metric("TV Only Impressions", format_number(tv_only), f"{tv_only/total_imp*100:.1f}% of total" if total_imp else "")
 
-    # Frequency Comparison
-    st.markdown("#### Average Frequency")
+    # Frequency Comparison — styled like the iSpot dashboard
+    st.markdown("#### Media Average Frequency")
     ott_freq = float(m["ott_avg_frequency"] or 0)
     lin_freq = float(m["linear_avg_frequency"] or 0)
-    col_freq, col_vals = st.columns([2, 1])
-    with col_freq:
+    col_kpi_l, col_chart, col_kpi_r = st.columns([1, 3, 1])
+    with col_kpi_l:
+        st.markdown(
+            f'<div style="text-align:center; padding:20px 0;">'
+            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">OTT Avg Frequency</div>'
+            f'<div style="font-size:48px; font-weight:700; color:{COLORS["navy"]};">{ott_freq:.1f}</div>'
+            f'</div>', unsafe_allow_html=True)
+    with col_chart:
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=["Locality OTT"], y=[ott_freq], marker_color=COLORS["navy"],
-            text=[f"{ott_freq:.1f}"], textposition="outside", showlegend=False))
-        fig.add_trace(go.Bar(x=["TV Market"], y=[lin_freq], marker_color=COLORS["light_cyan"],
-            text=[f"{lin_freq:.1f}"], textposition="outside", showlegend=False))
-        fig.update_layout(yaxis=dict(range=[0, max(ott_freq, lin_freq, 1) * 1.4]),
-            margin=dict(t=20, b=30, l=40, r=20), height=250,
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["light_gray"])
+        fig.add_trace(go.Bar(
+            x=["OTT Avg Frequency", "TV Avg Frequency"],
+            y=[ott_freq, lin_freq],
+            marker_color=[COLORS["navy"], COLORS["light_cyan"]],
+            text=[f"{ott_freq:.1f}", f"{lin_freq:.1f}"],
+            textposition="outside",
+            textfont=dict(size=16, color=COLORS["navy"]),
+            width=0.5,
+            showlegend=False,
+        ))
+        fig.update_layout(
+            yaxis=dict(range=[0, max(ott_freq, lin_freq, 1) * 1.35], title="", showgrid=True, gridcolor="#eee"),
+            xaxis=dict(tickfont=dict(size=13, color=COLORS["navy"])),
+            margin=dict(t=30, b=40, l=40, r=20),
+            height=280,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="white",
+        )
         st.plotly_chart(fig, use_container_width=True)
-    with col_vals:
-        st.metric("OTT Frequency", f"{ott_freq:.1f}")
-        st.metric("Linear Frequency", f"{lin_freq:.1f}")
+    with col_kpi_r:
+        st.markdown(
+            f'<div style="text-align:center; padding:20px 0;">'
+            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">TV Avg Frequency</div>'
+            f'<div style="font-size:48px; font-weight:700; color:{COLORS["light_cyan"]};">{lin_freq:.1f}</div>'
+            f'</div>', unsafe_allow_html=True)
 
     # DMA Breakout
     st.markdown("#### DMA Breakout")
@@ -813,6 +833,19 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         """Generate a multi-sheet Excel report with all dashboard data."""
         import io
         output = io.BytesIO()
+
+        # Helper to safely extract metric values (avoid Decimal/None serialization issues)
+        def _safe(val, fmt=""):
+            if val is None:
+                return 0
+            try:
+                v = float(val)
+                return f"{v:{fmt}}" if fmt else v
+            except (TypeError, ValueError):
+                return str(val)
+
+        row = m.iloc[0]
+
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             # Sheet 1: Summary metrics
             summary_data = {
@@ -824,24 +857,31 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                     "OTT Avg Frequency", "Linear Avg Frequency",
                 ],
                 "Value": [
-                    selected_brand, campaign_display, len(selected_dmas),
-                    f"{m.iloc[0].get('incrementality_pct', 0):.1f}%",
-                    m.iloc[0].get("ott_total_impressions", 0),
-                    m.iloc[0].get("ott_total_viewers", 0),
-                    m.iloc[0].get("ott_incremental_viewers", 0),
-                    m.iloc[0].get("all_viewers", 0),
-                    m.iloc[0].get("ott_only_impressions", 0),
-                    m.iloc[0].get("ott_tv_impressions", 0),
-                    m.iloc[0].get("tv_only_impressions", 0),
-                    m.iloc[0].get("ott_avg_frequency", 0),
-                    m.iloc[0].get("linear_avg_frequency", 0),
+                    str(selected_brand),
+                    str(campaign_display),
+                    int(len(selected_dmas)),
+                    _safe(row.get("incrementality_pct", 0), ".1f") + "%",
+                    _safe(row.get("ott_total_impressions", 0)),
+                    _safe(row.get("ott_total_viewers", 0)),
+                    _safe(row.get("ott_incremental_viewers", 0)),
+                    _safe(row.get("all_viewers", 0)),
+                    _safe(row.get("ott_only_impressions", 0)),
+                    _safe(row.get("ott_tv_impressions", 0)),
+                    _safe(row.get("tv_only_impressions", 0)),
+                    _safe(row.get("ott_avg_frequency", 0), ".1f"),
+                    _safe(row.get("linear_avg_frequency", 0), ".1f"),
                 ],
             }
             pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
 
-            # Sheet 2: DMA Breakout
+            # Sheet 2: DMA Breakout (convert Decimals to float)
             if not dma_df.empty:
-                dma_df.to_excel(writer, sheet_name="DMA Breakout", index=False)
+                export_dma = dma_df.copy()
+                for col in export_dma.select_dtypes(include=["object"]).columns:
+                    export_dma[col] = export_dma[col].apply(
+                        lambda x: float(x) if hasattr(x, "as_tuple") else x
+                    )
+                export_dma.to_excel(writer, sheet_name="DMA Breakout", index=False)
 
             # Sheet 3: Placement info (if selected)
             if selected_placement_info:
@@ -850,19 +890,19 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                     "Field": ["Placement", "Advertiser", "Agency", "Product", "Category",
                               "Start Date", "End Date"],
                     "Value": [
-                        pl.get("locality_placement_name", ""),
-                        pl.get("locality_advertiser", ""),
-                        pl.get("locality_agency", ""),
-                        pl.get("locality_product", ""),
-                        pl.get("advertiser_category", ""),
-                        pl.get("locality_placement_start_date", ""),
-                        pl.get("locality_placement_end_date", ""),
+                        str(pl.get("locality_placement_name", "")),
+                        str(pl.get("locality_advertiser", "")),
+                        str(pl.get("locality_agency", "")),
+                        str(pl.get("locality_product", "")),
+                        str(pl.get("advertiser_category", "")),
+                        str(pl.get("locality_placement_start_date", "")),
+                        str(pl.get("locality_placement_end_date", "")),
                     ],
                 }
                 pd.DataFrame(pl_data).to_excel(writer, sheet_name="Placement", index=False)
 
             # Sheet 4: Executive Insights
-            pd.DataFrame({"Insights": [insights]}).to_excel(
+            pd.DataFrame({"Insights": [str(insights)]}).to_excel(
                 writer, sheet_name="Executive Insights", index=False
             )
 
