@@ -595,7 +595,7 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                     862:(38.6,-121.5),866:(39.7,-104.9),868:(46.9,-114.0),881:(47.0,-117.4),
                 }
 
-                map_df = dma_df[["dma", "dma_id", "incrementality_pct", "ott_impressions"]].copy()
+                map_df = dma_df[["dma", "dma_id", "incrementality_pct", "ott_impressions", "ott_viewers", "incremental_viewers"]].copy()
                 map_df["lat"] = map_df["dma_id"].map(lambda x: DMA_COORDS.get(int(x), (None, None))[0])
                 map_df["lon"] = map_df["dma_id"].map(lambda x: DMA_COORDS.get(int(x), (None, None))[1])
                 map_df = map_df.dropna(subset=["lat", "lon"])
@@ -619,13 +619,17 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                             opacity=0.8,
                             line=dict(width=0.5, color="white"),
                         ),
-                        customdata=map_df[["dma", "incrementality_pct", "ott_impressions"]].values,
+                        customdata=map_df[["dma", "incrementality_pct", "ott_impressions", "ott_viewers", "incremental_viewers"]].values,
                         hovertemplate=(
                             "<b>%{customdata[0]}</b><br><br>"
                             "<b>Incrementality:</b> %{customdata[1]:.1f}%<br>"
                             "<span style='color:#888'>% of OTT viewers not reached by linear TV</span><br><br>"
                             "<b>OTT Impressions:</b> %{customdata[2]:,.0f}<br>"
-                            "<span style='color:#888'>Total ad views delivered by Locality</span>"
+                            "<span style='color:#888'>Total ad views delivered by Locality</span><br><br>"
+                            "<b>OTT Viewers:</b> %{customdata[3]:,.0f}<br>"
+                            "<span style='color:#888'>Unique households reached via streaming</span><br><br>"
+                            "<b>Incremental Viewers:</b> %{customdata[4]:,.0f}<br>"
+                            "<span style='color:#888'>HHs reached only by OTT (not linear TV)</span>"
                             "<extra></extra>"
                         ),
                         showlegend=False,
