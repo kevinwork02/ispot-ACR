@@ -474,44 +474,91 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
         st.metric("OTT + TV Impressions", format_number(ott_tv), f"{ott_tv/total_imp*100:.1f}% of total" if total_imp else "")
         st.metric("TV Only Impressions", format_number(tv_only), f"{tv_only/total_imp*100:.1f}% of total" if total_imp else "")
 
-    # Frequency Comparison — styled like the iSpot dashboard
+    # Frequency Comparison — cumulative trend by day (matches iSpot dashboard)
     st.markdown("#### Media Average Frequency")
     ott_freq = float(m["ott_avg_frequency"] or 0)
     lin_freq = float(m["linear_avg_frequency"] or 0)
-    col_kpi_l, col_chart, col_kpi_r = st.columns([1, 3, 1])
-    with col_kpi_l:
+
+    # KPI row: large numbers
+    kpi_l, kpi_r = st.columns(2)
+    with kpi_l:
         st.markdown(
-            f'<div style="text-align:center; padding:20px 0;">'
-            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">OTT Avg Frequency</div>'
+            f'<div style="padding:8px 0;">'
+            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">OTT Frequency</div>'
             f'<div style="font-size:48px; font-weight:700; color:{COLORS["navy"]};">{ott_freq:.1f}</div>'
             f'</div>', unsafe_allow_html=True)
-    with col_chart:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=["OTT Avg Frequency", "TV Avg Frequency"],
-            y=[ott_freq, lin_freq],
-            marker_color=[COLORS["navy"], COLORS["light_cyan"]],
-            text=[f"{ott_freq:.1f}", f"{lin_freq:.1f}"],
-            textposition="outside",
-            textfont=dict(size=16, color=COLORS["navy"]),
-            width=0.5,
-            showlegend=False,
-        ))
-        fig.update_layout(
-            yaxis=dict(range=[0, max(ott_freq, lin_freq, 1) * 1.35], title="", showgrid=True, gridcolor="#eee"),
-            xaxis=dict(tickfont=dict(size=13, color=COLORS["navy"])),
-            margin=dict(t=30, b=40, l=40, r=20),
-            height=280,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="white",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    with col_kpi_r:
+    with kpi_r:
         st.markdown(
-            f'<div style="text-align:center; padding:20px 0;">'
-            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">TV Avg Frequency</div>'
+            f'<div style="padding:8px 0;">'
+            f'<div style="font-size:13px; font-weight:600; color:{COLORS["navy"]};">TV Frequency</div>'
             f'<div style="font-size:48px; font-weight:700; color:{COLORS["light_cyan"]};">{lin_freq:.1f}</div>'
             f'</div>', unsafe_allow_html=True)
+
+    # Cumulative frequency trend by report_date from bronze table
+    try:
+        freq_where = f"LOWER(brand) = LOWER('{brand_escaped}')"
+        if selected_campaign_id is not None:
+            freq_where += f" AND campaign_id = {selected_campaign_id}"
+        if selected_dmas and len(selected_dmas) < len(available_dmas):
+            dma_list = ",".join(f"'{d.replace(chr(39), chr(39)+chr(39))}'" for d in selected_dmas)
+            freq_where += f" AND dma IN ({dma_list})"
+
+        freq_trend_df = run_query(f"""
+            SELECT report_date,
+                ROUND(SUM(ott_total_impressions) * 1.0 / NULLIF(SUM(ott_total_viewers), 0), 1) AS ott_frequency,
+                ROUND(SUM(linear_total_impressions) * 1.0 / NULLIF(CAST(SUM(linear_viewers) AS BIGINT), 0), 1) AS tv_frequency
+            FROM locality_dev.bronze.ispot_dma_reports_ytd
+            WHERE {freq_where}
+            GROUP BY report_date
+            ORDER BY report_date
+        """)
+
+        if not freq_trend_df.empty and len(freq_trend_df) > 1:
+            # Cast Decimal to float
+            freq_trend_df["ott_frequency"] = freq_trend_df["ott_frequency"].astype(float)
+            freq_trend_df["tv_frequency"] = freq_trend_df["tv_frequency"].astype(float)
+
+            fig_freq = go.Figure()
+            fig_freq.add_trace(go.Scatter(
+                x=freq_trend_df["report_date"],
+                y=freq_trend_df["ott_frequency"],
+                name="OTT Frequency",
+                mode="lines+text",
+                line=dict(color=COLORS["navy"], width=2.5),
+                text=freq_trend_df["ott_frequency"].apply(
+                    lambda v: f"{v:.1f}" if v == freq_trend_df["ott_frequency"].iloc[-1] else ""
+                ),
+                textposition="top center",
+                textfont=dict(size=11, color=COLORS["navy"]),
+            ))
+            fig_freq.add_trace(go.Scatter(
+                x=freq_trend_df["report_date"],
+                y=freq_trend_df["tv_frequency"],
+                name="TV Frequency",
+                mode="lines+text",
+                line=dict(color=COLORS["light_cyan"], width=2.5),
+                text=freq_trend_df["tv_frequency"].apply(
+                    lambda v: f"{v:.1f}" if v == freq_trend_df["tv_frequency"].iloc[-1] else ""
+                ),
+                textposition="bottom center",
+                textfont=dict(size=11, color=COLORS["cyan"]),
+            ))
+            fig_freq.update_layout(
+                height=280,
+                margin=dict(t=30, b=40, l=50, r=30),
+                legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="white",
+                yaxis=dict(title="Avg Frequency", showgrid=True, gridcolor="#eee",
+                           range=[0, max(freq_trend_df["ott_frequency"].max(), freq_trend_df["tv_frequency"].max(), 1) * 1.2]),
+                xaxis=dict(title=""),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_freq, use_container_width=True)
+        else:
+            st.caption("Not enough data points for frequency trend.")
+    except Exception as freq_err:
+        st.caption(f"Frequency trend unavailable: {freq_err}")
 
     # DMA Breakout
     st.markdown("#### DMA Breakout")
