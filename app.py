@@ -518,7 +518,21 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                 showscale=False,
             ),
             text=bar_labels,
-            textposition="outside"))
+            textposition="outside",
+            customdata=display_dma[["ott_impressions", "ott_viewers", "incremental_viewers"]].values,
+            hovertemplate=(
+                "<b>%{y}</b><br><br>"
+                "<b>Incrementality:</b> %{x:.1f}%<br>"
+                "<span style='color:#888'>% of OTT viewers not reached by TV</span><br><br>"
+                "<b>OTT Impressions:</b> %{customdata[0]:,.0f}<br>"
+                "<span style='color:#888'>Total ad views delivered</span><br><br>"
+                "<b>OTT Viewers:</b> %{customdata[1]:,.0f}<br>"
+                "<span style='color:#888'>Unique households reached</span><br><br>"
+                "<b>Incremental Viewers:</b> %{customdata[2]:,.0f}<br>"
+                "<span style='color:#888'>HHs reached only via streaming</span>"
+                "<extra></extra>"
+            ),
+        ))
         fig.update_layout(
             title="Top DMAs by Incrementality %",
             xaxis=dict(title="Incrementality %", range=[0, min(pct_max * 1.3, 105)]),
@@ -605,11 +619,15 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                             opacity=0.8,
                             line=dict(width=0.5, color="white"),
                         ),
-                        text=map_df.apply(
-                            lambda r: f"{r['dma']}<br>{r['incrementality_pct']:.0f}% incr.<br>{format_number(r['ott_impressions'])} imp",
-                            axis=1
+                        customdata=map_df[["dma", "incrementality_pct", "ott_impressions"]].values,
+                        hovertemplate=(
+                            "<b>%{customdata[0]}</b><br><br>"
+                            "<b>Incrementality:</b> %{customdata[1]:.1f}%<br>"
+                            "<span style='color:#888'>% of OTT viewers not reached by linear TV</span><br><br>"
+                            "<b>OTT Impressions:</b> %{customdata[2]:,.0f}<br>"
+                            "<span style='color:#888'>Total ad views delivered by Locality</span>"
+                            "<extra></extra>"
                         ),
-                        hoverinfo="text",
                         showlegend=False,
                     ))
                     # Size reference bubbles (legend-only, invisible on map)
