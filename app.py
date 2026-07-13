@@ -601,7 +601,7 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                                 [0.7, COLORS["cyan"]],
                                 [1.0, COLORS["navy"]],
                             ],
-                            colorbar=dict(title="Incr. %", thickness=12),
+                            colorbar=dict(title=dict(text="Incrementality %", font=dict(size=11)), thickness=14, len=0.6, y=0.5),
                             opacity=0.8,
                             line=dict(width=0.5, color="white"),
                         ),
@@ -619,10 +619,17 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
                         showsubunits=True, subunitcolor="#ddd",
                     )
                     fig_map.update_layout(
-                        margin=dict(t=10, b=10, l=10, r=10),
-                        height=450,
+                        margin=dict(t=30, b=50, l=10, r=10),
+                        height=470,
                         paper_bgcolor="rgba(0,0,0,0)",
                         geo=dict(bgcolor="rgba(0,0,0,0)"),
+                        annotations=[
+                            dict(
+                                text="<b>Bubble size</b> = OTT Impressions &nbsp;&nbsp;|&nbsp;&nbsp; <b>Color</b> = Incrementality %",
+                                x=0.5, y=-0.05, xref="paper", yref="paper",
+                                showarrow=False, font=dict(size=12, color="#555"),
+                            )
+                        ],
                     )
                 # Click-to-filter: capture selected DMA from map
                     event = st.plotly_chart(fig_map, use_container_width=True, on_select="rerun", key="dma_map")
