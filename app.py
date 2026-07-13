@@ -890,23 +890,22 @@ if st.button("\U0001f4ca Generate Report", type="primary", use_container_width=T
             except (TypeError, ValueError):
                 return str(val)
 
-        row = m.iloc[0]
-
+        # m is already a pandas Series (metrics_df.iloc[0]), use .get() directly
         # Section 1: Summary
         lines.append("=== SUMMARY ===")
         lines.append(f"Brand,{selected_brand}")
         lines.append(f"Campaign,{campaign_display}")
         lines.append(f"DMAs Analyzed,{len(selected_dmas)}")
-        lines.append(f"Incrementality %,{_s(row.get('incrementality_pct', 0))}")
-        lines.append(f"OTT Total Impressions,{_s(row.get('ott_total_impressions', 0))}")
-        lines.append(f"OTT Total Viewers,{_s(row.get('ott_total_viewers', 0))}")
-        lines.append(f"OTT Incremental Viewers,{_s(row.get('ott_incremental_viewers', 0))}")
-        lines.append(f"All Viewers,{_s(row.get('all_viewers', 0))}")
-        lines.append(f"OTT Only Impressions,{_s(row.get('ott_only_impressions', 0))}")
-        lines.append(f"OTT + TV Impressions,{_s(row.get('ott_tv_impressions', 0))}")
-        lines.append(f"TV Only Impressions,{_s(row.get('tv_only_impressions', 0))}")
-        lines.append(f"OTT Avg Frequency,{_s(row.get('ott_avg_frequency', 0))}")
-        lines.append(f"Linear Avg Frequency,{_s(row.get('linear_avg_frequency', 0))}")
+        lines.append(f"Incrementality %,{_s(m.get('incrementality_pct', 0))}")
+        lines.append(f"OTT Total Impressions,{_s(m.get('ott_total_impressions', 0))}")
+        lines.append(f"OTT Total Viewers,{_s(m.get('ott_total_viewers', 0))}")
+        lines.append(f"OTT Incremental Viewers,{_s(m.get('ott_incremental_viewers', 0))}")
+        lines.append(f"All Viewers,{_s(m.get('all_viewers', 0))}")
+        lines.append(f"OTT Only Impressions,{_s(m.get('ott_only_impressions', 0))}")
+        lines.append(f"OTT + TV Impressions,{_s(m.get('ott_tv_impressions', 0))}")
+        lines.append(f"TV Only Impressions,{_s(m.get('tv_only_impressions', 0))}")
+        lines.append(f"OTT Avg Frequency,{_s(m.get('ott_avg_frequency', 0))}")
+        lines.append(f"Linear Avg Frequency,{_s(m.get('linear_avg_frequency', 0))}")
         lines.append("")
 
         # Section 2: Placement (if selected)
